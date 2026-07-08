@@ -1,0 +1,13 @@
+# Ignore everything by default; allowlist source only (per user's Version Control rule)
+*
+!.gitignore
+!*.py
+!ctl.sh
+!README.md
+!agent_prompt.md
+!requirements.txt
+!.env.example
+
+# Allowlist the Claude settings (no secrets), but nothing else under .claude/
+!.claude/
+!.claude/settings.json
