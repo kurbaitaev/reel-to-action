@@ -40,6 +40,9 @@ quotes. Keep every field short — one sentence unless it's a list.
   **named concepts / laws / theories / frameworks / terms** (e.g. "Survivorship bias",
   "Power law", "Regression to the mean"). Each as `{type, name, author, link, verified, verify_note}`
   where `type` ∈ book|podcast|tool|product|resource|video|channel|**concept**. Verify each on the web. Rules:
+  - **Search tool:** prefer `firecrawl_search` (the firecrawl MCP tool — richer results with page
+    content, so you can confirm the destination is the RIGHT one). If it's unavailable or errors,
+    fall back to the built-in WebSearch. Never skip verification just because one tool fails.
   - `verified: true` ONLY when `link` is the **canonical/official destination** — the show's
     Spotify/Apple Podcasts page, the book's Goodreads/Amazon/publisher page, the tool's official
     site or App Store page, the video's actual youtube.com/watch or channel URL, and for a

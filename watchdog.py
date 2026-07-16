@@ -71,10 +71,63 @@ def wlog(msg: str) -> None:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
 
+_AUTH_FLAG = PROJ / "logs" / ".auth_alerted"
+
+
+def claude_token_expired() -> bool:
+    """Read Claude Code's OAuth expiry from the login keychain (cheap, no API call)."""
+    try:
+        r = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                           capture_output=True, text=True, timeout=10)
+        exp = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("expiresAt")
+        return bool(exp) and (exp / 1000) < time.time()
+    except Exception:  # noqa: BLE001
+        return False  # can't read → don't false-alarm
+
+
+def check_claude_auth(token: str, chat: str) -> None:
+    """Alert once when the Claude OAuth token expires; reset when re-logged-in."""
+    if claude_token_expired():
+        if not _AUTH_FLAG.exists():
+            alert(token, chat,
+                  "🔑 Claude login expired — the bot can't analyze reels until you run "
+                  "`claude` → `/login` in a terminal. Reels you send are kept and will "
+                  "be recovered after login.")
+            _AUTH_FLAG.write_text(str(int(time.time())))
+            wlog("claude OAuth EXPIRED -> alerted user")
+    elif _AUTH_FLAG.exists():
+        _AUTH_FLAG.unlink(missing_ok=True)
+        alert(token, chat, "✅ Claude login restored — the bot is analyzing reels again.")
+        wlog("claude OAuth restored")
+
+
+def ensure_workspace_trust() -> bool:
+    """A CLI re-login can reset ~/.claude.json and drop this project's trust flag,
+    which silently disables the agent's permission allowlist (WebSearch, vault writes)
+    — reels still process but with unverified links. Restore the flag if missing."""
+    p = pathlib.Path.home() / ".claude.json"
+    try:
+        c = json.loads(p.read_text())
+        proj = c.setdefault("projects", {}).setdefault(str(PROJ), {})
+        if not proj.get("hasTrustDialogAccepted"):
+            proj["hasTrustDialogAccepted"] = True
+            p.write_text(json.dumps(c, indent=2))
+            return True  # was broken → fixed
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def main() -> None:
     load_env()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat = os.environ.get("ALLOWED_USER_IDS", "").split(",")[0].strip()
+
+    if ensure_workspace_trust():
+        wlog("workspace trust flag was missing -> restored")
+        alert(token, chat, "🔧 Restored the bot's workspace trust flag — web search had been "
+                           "silently disabled (happens after a CLI re-login). Fixed automatically.")
+    check_claude_auth(token, chat)
 
     running = bot_running()
     online = telegram_ok(token)

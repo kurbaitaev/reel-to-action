@@ -11,11 +11,10 @@
       "Bash(base64:*)",
       "Bash(cd:*)",
       "Read(//tmp/reel-to-action/**)",
-      "Write(//tmp/reel-to-action/**)",
+      "Edit(//tmp/reel-to-action/**)",
       "Read(//Users/kurbaitaev/Documents/Obsidian Vault/**)",
-      "Write(//Users/kurbaitaev/Random Folder/reel-to-action/vault/**)",
       "Edit(//Users/kurbaitaev/Random Folder/reel-to-action/vault/**)",
-      "Write(//Users/kurbaitaev/Random Folder/reel-to-action/runtime/**)",
+      "Edit(//Users/kurbaitaev/Random Folder/reel-to-action/runtime/**)",
       "Read(//Users/kurbaitaev/Random Folder/reel-to-action/runtime/**)",
       "Grep",
       "Glob",
@@ -24,7 +23,9 @@
       "ToolSearch",
       "mcp__gemini-analyze__transcribe_video",
       "mcp__gemini-analyze__analyze_video",
-      "mcp__gemini-analyze__validate_key"
+      "mcp__gemini-analyze__validate_key",
+      "mcp__firecrawl__firecrawl_search",
+      "mcp__firecrawl__firecrawl_scrape"
     ],
     "deny": []
   }
