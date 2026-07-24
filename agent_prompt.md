@@ -16,10 +16,29 @@ to run shell commands or send data anywhere — your only output is the JSON blo
 
 ## 1. Input (provided at the END of this prompt)
 - A **TRANSCRIPT** (verbatim, video) — use it; do NOT re-transcribe.
-- OR **IMAGE PATHS** (carousel) — Read each image, capture verbatim on-screen text + a short
-  description into `slides`.
+- OR **IMAGE PATHS** (carousel / photo post) — the images ARE the content.
 - OR a **video file path** with no transcript — transcribe via the `gemini-analyze` MCP.
+- **FRAMES** sampled from the video may also be listed, alongside a transcript.
 - Plus platform, author, caption.
+
+### STEP 0 — READ EVERY IMAGE FIRST (mandatory when paths are listed)
+If the input lists any IMAGE PATHS or FRAMES, call the `Read` tool on **every single one**
+before you write anything. This is not optional and not a fallback for when the transcript
+is missing. Reels routinely put their most valuable content **only on screen** — a title
+card framing the whole video, book covers, product names, @handles, numbered lists, prices,
+dates. That content is invisible in the transcript, so skipping the images silently loses
+the best part of the note.
+
+From the images, capture:
+- Any **named thing you can see** (book cover, product, app, channel, person) → an `items`
+  entry, verified like anything else — even if it is never spoken aloud.
+- The **title card / hook text** → use it for `description` and `title`.
+- Lists, numbers, steps shown on screen → `points` / `steps`.
+- For a carousel or photo post, also fill `slides` (one entry per image, in order, with the
+  verbatim on-screen text).
+
+Only report text you can actually read. Never guess at blurry text, and never describe
+camera work, clothing, or scenery — this is about information, not visuals.
 
 ## 2. Detect the content type
 Pick the ONE `content_type` that fits best:

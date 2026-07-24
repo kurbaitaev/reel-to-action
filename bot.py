@@ -62,11 +62,13 @@ def build_prompt(url: str, media: dict) -> str:
         ctx.append(f"Author: {media['author']}")
     if media.get("caption"):
         ctx.append(f"Caption:\n{media['caption'][:2000]}")
-    if media.get("kind") == "carousel" and media.get("images"):
+    if media.get("images"):
         paths = "\n".join(media["images"])
+        label = "CAROUSEL" if media.get("kind") == "carousel" else "PHOTO POST"
         ctx.append(
-            "CAROUSEL — there is no audio. Read EACH of these local image files, capture the "
-            f"verbatim on-screen text + a short description, and fill `slides`:\n{paths}"
+            f"{label} — there is no audio, so the images ARE the content. Read EACH of these "
+            "local image files with the Read tool, capture the verbatim on-screen text + a short "
+            f"description, and fill `slides` (one entry per image, in order):\n{paths}"
         )
     elif media.get("transcript"):
         ctx.append(
@@ -78,8 +80,20 @@ def build_prompt(url: str, media: dict) -> str:
             f"No transcript. Video downloaded at: {media['video_path']} — transcribe it with "
             f"the gemini-analyze MCP (do NOT run yt-dlp)."
         )
-    else:
+    elif not media.get("frames"):
         ctx.append("No transcript/images — use the caption; fetch the URL if it's an article.")
+    # Frames are supplementary: they can accompany a transcript, or (when the
+    # speech is thin) carry the content on their own.
+    if media.get("frames"):
+        paths = "\n".join(media["frames"])
+        ctx.append(
+            "FRAMES sampled from the video — Read these with the Read tool. Reels often put the "
+            "real content on screen (book titles, names, numbered lists, prices, handles) and "
+            "never say it out loud. Mine them for anything the transcript is missing and fold it "
+            "into `items`/`points`/`quote`. If a frame shows a book cover, product, or account, "
+            "that's an `item` — verify it like any other. Do NOT describe camera work, outfits, "
+            f"or scenery, and do NOT invent text you cannot actually read:\n{paths}"
+        )
     return (
         PROMPT_FILE.read_text()
         + f"\n\n---\nToday's date: {datetime.date.today().isoformat()}\n"
@@ -173,6 +187,9 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
         "platform": media.get("platform"),
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
     })
+    # The agent has read everything it needs; keeping the media would only fill
+    # the disk and risk a later reel picking up a stale file.
+    await asyncio.to_thread(acquire.cleanup, media)
     if force:
         # redo = replace: drop older Notion row + vault note for this reel
         n = await asyncio.to_thread(notion.dedupe_by_source, url) if notion.enabled() else 0
@@ -290,7 +307,7 @@ def _detail_text(obj: dict, transcript: str) -> str:
     parts = []
     if _ok(obj.get("summary")):
         parts.append(_esc(obj["summary"]))
-    if obj.get("kind") == "carousel" and obj.get("slides"):
+    if obj.get("slides"):
         parts.append(_slides_html(obj))
     elif transcript.strip():
         parts.append(_esc(transcript))
@@ -625,7 +642,7 @@ def _write_vault_note(obj: dict, url: str, transcript: str, date_iso: str) -> st
     L += ["", f"**Original:** {url}"]
     if tags:
         L.append(tags)
-    if obj.get("kind") == "carousel" and obj.get("slides"):
+    if obj.get("slides"):
         L += ["", "## Slides"]
         for i, s in enumerate(obj["slides"], 1):
             L.append(f"### Slide {i}")

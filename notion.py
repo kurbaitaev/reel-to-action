@@ -247,7 +247,7 @@ def push_reel(obj: dict, source_url: str, date_iso: str,
     if tags:
         children.append(_para(" ".join("#" + str(t).strip().replace(" ", "_") for t in tags), color="gray"))
 
-    if kind == "carousel" and obj.get("slides"):
+    if obj.get("slides"):
         slide_text = "\n\n".join(
             f"Slide {i}" + (f" — {s.get('description', '')}" if s.get("description") else "")
             + (f"\n{s.get('text', '')}" if s.get("text") else "")
