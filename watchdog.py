@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Hourly health check for the reel-to-action bot (run by launchd).
 
-Checks the bot is alive AND actively polling. If it's down or stuck, restarts
-it and pings the user on Telegram. Stays silent when healthy (no hourly spam).
-A network gap (Mac offline) is NOT treated as a failure — the bot self-heals
-when connectivity returns, so the watchdog leaves it alone.
+Checks the bot is alive AND actively polling (via logs/heartbeat, touched every
+60s by the bot). If it's down or stuck, restarts it and pings the user on
+Telegram. Sends a visible "healthy" ping each run — the user asked for proof it's
+actually checking. A network gap (Mac offline) is NOT treated as a failure — the
+bot self-heals when connectivity returns, so the watchdog leaves it alone.
 """
 
 import json
@@ -18,8 +19,9 @@ import urllib.request
 PROJ = pathlib.Path(__file__).resolve().parent
 LABEL = "com.kurbaitaev.reel-to-action"
 LOG = PROJ / "logs" / "bot.err.log"
+HEARTBEAT = PROJ / "logs" / "heartbeat"  # bot touches this every 60s while polling
 WLOG = PROJ / "logs" / "watchdog.log"
-STALE_SECONDS = 600  # bot logs a poll every ~10s; >10 min of silence = stuck
+STALE_SECONDS = 600  # >10 min without a heartbeat = stuck
 
 
 def load_env() -> None:
@@ -72,15 +74,28 @@ def wlog(msg: str) -> None:
 
 
 _AUTH_FLAG = PROJ / "logs" / ".auth_alerted"
+# The OAuth *access* token expires hourly and Claude Code refreshes it silently on
+# next use, so "expired" alone is not a broken login — alerting on it produced ~2
+# false alarms a day. Only a login that stays expired this long is really dead.
+AUTH_GRACE_S = 6 * 3600
+_AUTH_SEEN = PROJ / "logs" / ".auth_expired_since"
 
 
 def claude_token_expired() -> bool:
-    """Read Claude Code's OAuth expiry from the login keychain (cheap, no API call)."""
+    """True only if the login has been expired for longer than the grace period
+    AND has no refresh token (i.e. it genuinely needs an interactive /login)."""
     try:
         r = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
                            capture_output=True, text=True, timeout=10)
-        exp = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("expiresAt")
-        return bool(exp) and (exp / 1000) < time.time()
+        blob = json.loads(r.stdout.strip()).get("claudeAiOauth", {})
+        exp = blob.get("expiresAt")
+        fresh = not exp or (exp / 1000) >= time.time()
+        if fresh or blob.get("refreshToken"):
+            _AUTH_SEEN.unlink(missing_ok=True)  # refreshable → not a real outage
+            return False
+        first = float(_AUTH_SEEN.read_text()) if _AUTH_SEEN.exists() else time.time()
+        _AUTH_SEEN.write_text(str(first))
+        return (time.time() - first) > AUTH_GRACE_S
     except Exception:  # noqa: BLE001
         return False  # can't read → don't false-alarm
 
@@ -131,7 +146,9 @@ def main() -> None:
 
     running = bot_running()
     online = telegram_ok(token)
-    stale = (time.time() - LOG.stat().st_mtime) > STALE_SECONDS if LOG.exists() else True
+    # No heartbeat file yet (fresh clone / just-upgraded bot) means "unknown", not
+    # "stuck" — treating it as stuck would restart a healthy bot every cycle.
+    stale = (time.time() - HEARTBEAT.stat().st_mtime) > STALE_SECONDS if HEARTBEAT.exists() else False
 
     if not running:
         restart()
@@ -139,7 +156,8 @@ def main() -> None:
         ok = bot_running()
         wlog(f"DOWN -> restarted, now running={ok}")
         if online:
-            alert(token, chat, "⚠️ The reel bot was down — restarted it. ✅ Back up.")
+            alert(token, chat, "⚠️ The reel bot was down — restarted it. ✅ Back up."
+                  if ok else "🚨 The reel bot is down and the restart FAILED — needs a look.")
     elif stale and online:
         # process alive but not polling, while the internet IS up → stuck
         restart()

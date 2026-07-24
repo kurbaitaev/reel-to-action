@@ -1,15 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "Bash(yt-dlp:*)",
-      "Bash(ffmpeg:*)",
-      "Bash(ffprobe:*)",
-      "Bash(curl:*)",
-      "Bash(mkdir:*)",
-      "Bash(ls:*)",
-      "Bash(cat:*)",
-      "Bash(base64:*)",
-      "Bash(cd:*)",
       "Read(//tmp/reel-to-action/**)",
       "Edit(//tmp/reel-to-action/**)",
       "Read(//Users/kurbaitaev/Documents/Obsidian Vault/**)",

@@ -33,7 +33,13 @@ AGENT_TIMEOUT_S = 15 * 60
 URL_RE = re.compile(r"https?://\S+")
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+# httpx logs full request URLs, and Telegram's URLs embed the bot token — that
+# would write the token into every log line. Errors still surface.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("reel-to-action")
+
+# The watchdog uses this file's mtime to tell "alive and polling" from "stuck".
+HEARTBEAT = PROJECT_DIR / "logs" / "heartbeat"
 
 
 def load_env() -> None:
@@ -139,6 +145,7 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
         log.warning("no @@JSON@@ block in agent output for %s", url)
         return html.escape(JSON_RE.sub("", raw).strip()), None
 
+    obj = _sanitize(obj)
     n_bad = _validate_links(obj)
     if n_bad:
         log.info("downgraded %d non-canonical 'verified' link(s) for %s", n_bad, url)
@@ -213,6 +220,25 @@ def _parse_output(raw: str) -> dict | None:
 _SEARCH_URL = re.compile(
     r"(/search\b|/results\b|[?&]q=|[?&]query=|search_query=|google\.[a-z.]+/search|"
     r"bing\.com/search|duckduckgo\.com)", re.I)
+
+
+_STR_LISTS = ("points", "steps", "tags", "categories")
+
+
+def _sanitize(obj: dict) -> dict:
+    """The agent is a model, so its JSON shape is a request, not a guarantee.
+    Coerce the collection fields to what every renderer downstream assumes —
+    one stray list-of-strings in `items` used to crash the whole reel."""
+    for key in _STR_LISTS:
+        val = obj.get(key)
+        if isinstance(val, list):
+            obj[key] = [str(v).strip() for v in val if isinstance(v, (str, int, float)) and str(v).strip()]
+        elif val is not None:
+            obj[key] = [str(val)] if isinstance(val, (str, int, float)) else []
+    for key in ("items", "slides"):
+        val = obj.get(key)
+        obj[key] = [v for v in val if isinstance(v, dict)] if isinstance(val, list) else []
+    return obj
 
 
 def _validate_links(obj: dict) -> int:
@@ -512,6 +538,7 @@ async def process(bot, chat_id: int, url: str, force: bool) -> None:
     """
     norm = acquire.normalize_url(url)
     ledger.pending_add(norm, chat_id)
+    mid = None
     try:
         rich = os.environ.get("RICH_MESSAGE", "1") == "1"
         mid = await _send_rich_id(chat_id, "<b>⏳ Working on your reel…</b>") if rich else None
@@ -528,6 +555,16 @@ async def process(bot, chat_id: int, url: str, force: bool) -> None:
         if mid and await _edit_rich(chat_id, mid, rich_md or html_msg):
             return
         await deliver(bot, chat_id, html_msg, rich_md)  # fresh-send fallback
+    except Exception as e:  # noqa: BLE001
+        # Anything unhandled must still close the loop — otherwise the user is
+        # left watching "⏳ Working…" forever with no idea the reel died.
+        log.error("processing failed for %s", url, exc_info=e)
+        err = f"❌ That reel broke while processing:\n{type(e).__name__}: {e}\n\nSend /force to retry."
+        if not (mid and await _edit_rich(chat_id, mid, html.escape(err))):
+            try:
+                await bot.send_message(chat_id, err)
+            except Exception:  # noqa: BLE001
+                pass
     finally:
         ledger.pending_remove(norm)
 
@@ -683,11 +720,26 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log handler/network errors instead of leaving them unhandled."""
-    log.error("handler error: %s", context.error)
+    log.error("handler error", exc_info=context.error)
+
+
+MAX_RESUME_ATTEMPTS = 3
+
+
+async def _heartbeat() -> None:
+    """Touch a file every minute so the watchdog can tell alive from stuck."""
+    HEARTBEAT.parent.mkdir(exist_ok=True)
+    while True:
+        try:
+            HEARTBEAT.touch()
+        except OSError:
+            pass
+        await asyncio.sleep(60)
 
 
 async def _resume_pending(app) -> None:
     """On startup, re-process any reels that were interrupted mid-flight."""
+    asyncio.create_task(_heartbeat())
     pend = ledger.pending_all()
     if not pend:
         return
@@ -697,6 +749,18 @@ async def _resume_pending(app) -> None:
             chat_id = rec.get("chat_id")
             if not chat_id:
                 ledger.pending_remove(url)
+                continue
+            # A reel that keeps killing the bot would otherwise be retried on
+            # every startup forever, blocking real messages behind it.
+            if ledger.pending_attempt(url) > MAX_RESUME_ATTEMPTS:
+                ledger.pending_remove(url)
+                log.warning("giving up on %s after %d attempts", url, MAX_RESUME_ATTEMPTS)
+                try:
+                    await app.bot.send_message(
+                        chat_id, f"⚠️ Couldn't recover this one after several tries: {url}"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 continue
             log.info("resuming interrupted reel %s", url)
             try:
