@@ -37,6 +37,17 @@ def _api(url: str, token: str, method: str = "GET", body: dict | None = None) ->
         return json.load(r)
 
 
+def _has_source_url(token: str, db_id: str) -> bool:
+    """Both lookups filter on Source being a url column. If it's been renamed or
+    retyped, the query 400s — which used to silently break /force dedup (extra
+    live pages) and date preservation (dates reset to today)."""
+    if _db_props(token, db_id).get("Source") == "url":
+        return True
+    log.warning("no 'Source' url column in the Notion DB — dedup and date "
+                "preservation are disabled. Add one to enable them.")
+    return False
+
+
 def existing_date(source_url: str) -> str | None:
     """Return the Date (YYYY-MM-DD) of the current live page for this reel, if any.
 
@@ -44,7 +55,7 @@ def existing_date(source_url: str) -> str | None:
     """
     token = os.environ.get("NOTION_TOKEN", "").strip()
     db_id = os.environ.get("NOTION_DATABASE_ID", "").strip()
-    if not (token and db_id and source_url):
+    if not (token and db_id and source_url) or not _has_source_url(token, db_id):
         return None
     try:
         data = _api(f"https://api.notion.com/v1/databases/{db_id}/query", token, "POST",
@@ -64,7 +75,7 @@ def dedupe_by_source(source_url: str) -> int:
     """
     token = os.environ.get("NOTION_TOKEN", "").strip()
     db_id = os.environ.get("NOTION_DATABASE_ID", "").strip()
-    if not (token and db_id and source_url):
+    if not (token and db_id and source_url) or not _has_source_url(token, db_id):
         return 0
     try:
         data = _api(f"https://api.notion.com/v1/databases/{db_id}/query", token, "POST",
@@ -78,19 +89,67 @@ def dedupe_by_source(source_url: str) -> int:
         try:
             _api(f"https://api.notion.com/v1/pages/{r['id']}", token, "PATCH", {"archived": True})
             archived += 1
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            log.warning("archiving old page failed: %s", e)  # don't count it as archived
     return archived
 
 
-def _post(payload: dict, token: str) -> tuple[bool, str]:
+def _post(payload: dict, token: str) -> tuple[bool, str, str]:
+    """Create the page. Returns (ok, error, page_id)."""
     try:
-        _api(API, token, "POST", payload)
-        return True, ""
+        d = _api(API, token, "POST", payload)
+        return True, "", d.get("id", "")
     except urllib.error.HTTPError as e:
-        return False, f"{e.code} {e.read().decode()[:300]}"
+        return False, f"{e.code} {e.read().decode()[:300]}", ""
     except Exception as e:  # noqa: BLE001
-        return False, str(e)
+        return False, str(e), ""
+
+
+def _append_blocks(page_id: str, blocks: list, token: str) -> None:
+    """Notion accepts at most 100 blocks per call, so overflow is appended in
+    batches. Without this the tail of a long note was silently dropped."""
+    for i in range(0, len(blocks), 100):
+        try:
+            _api(f"https://api.notion.com/v1/blocks/{page_id}/children", token, "PATCH",
+                 {"children": blocks[i:i + 100]})
+        except Exception as e:  # noqa: BLE001
+            log.warning("appending blocks %d+ failed: %s", i, e)
+            return
+
+
+def _prop_value(ptype: str, value) -> dict | None:
+    """Build a property payload for the column's ACTUAL type.
+
+    The database is hand-customized, so a column may be renamed *or* retyped.
+    Matching on name alone and assuming a shape made Notion 400 the whole page
+    — which lost the entire note while Telegram still looked fine.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    s = str(value)
+    if ptype == "title":
+        return {"title": [{"text": {"content": s[:2000]}}]}
+    if ptype == "rich_text":
+        return {"rich_text": [{"text": {"content": s[:2000]}}]}
+    if ptype == "select":
+        return {"select": {"name": s[:100]}}
+    if ptype == "multi_select":
+        vals = value if isinstance(value, (list, tuple)) else [value]
+        return {"multi_select": [{"name": str(v)[:100]} for v in vals if str(v).strip()]}
+    if ptype == "url":
+        return {"url": s}
+    if ptype == "date":
+        return {"date": {"start": s}}
+    if ptype == "number":
+        try:
+            return {"number": float(value) if not isinstance(value, bool) else None}
+        except (TypeError, ValueError):
+            return None
+    if ptype == "checkbox":
+        return {"checkbox": bool(value)}
+    if ptype in ("email", "phone_number"):
+        return {ptype: s}
+    return None  # formula/rollup/relation/etc — not ours to set
 
 
 def _heading(text: str) -> dict:
@@ -202,24 +261,29 @@ def push_reel(obj: dict, source_url: str, date_iso: str,
     title_prop = next((n for n, t in schema.items() if t == "title"), "Name")
     props = {title_prop: {"title": [{"text": {"content": title[:2000]}}]}}
 
-    def setp(name: str, value: dict) -> None:
-        if name in schema:
-            props[name] = value
+    def setp(name: str, value) -> None:
+        """Set a column if it exists, formatted for whatever type it actually is."""
+        ptype = schema.get(name)
+        if not ptype or name == title_prop:
+            return
+        payload = _prop_value(ptype, value)
+        if payload is not None:
+            props[name] = payload
 
-    setp("Source", {"url": source_url or None})
-    setp("Date", {"date": {"start": date_iso}})
-    setp("Items", {"number": len(items)})
+    setp("Source", source_url)
+    setp("Date", date_iso)
+    setp("Items", len(items))
     if cats:
-        setp("Category", {"multi_select": [{"name": c[:100]} for c in cats]})
+        setp("Category", cats)
     if _ok(author):
-        setp("Author", {"rich_text": [{"text": {"content": author[:200]}}]})
+        setp("Author", author[:200])
     if platform:
-        setp("Platform", {"select": {"name": str(platform)[:100]}})
+        setp("Platform", platform)
     if description:
-        setp("Summary", {"rich_text": [{"text": {"content": description[:2000]}}]})
-        setp("Hook / key idea", {"rich_text": [{"text": {"content": description[:2000]}}]})
+        setp("Summary", description)
+        setp("Hook / key idea", description)
     if summary:
-        setp("Takeaways", {"rich_text": [{"text": {"content": summary[:2000]}}]})
+        setp("Takeaways", summary)
 
     children = []
     if _ok(quote):
@@ -256,11 +320,16 @@ def push_reel(obj: dict, source_url: str, date_iso: str,
     elif transcript.strip():
         children.append(_toggle("📄 Transcript (verbatim)", transcript.strip()))
 
-    ok, err = _post(
+    ok, err, page_id = _post(
         {"parent": {"database_id": db_id}, "properties": props, "children": children[:100]},
         token,
     )
-    if ok:
-        return {"created": 1, "items": len(items), "error": ""}
-    log.warning("notion reel page failed: %s", err)
-    return {"created": 0, "items": len(items), "error": err}
+    if not ok:
+        log.warning("notion reel page failed: %s", err)
+        return {"created": 0, "items": len(items), "error": err}
+    # Anything past Notion's 100-block limit goes in follow-up calls. The
+    # transcript toggle lives at the end, so without this a long list reel
+    # silently lost the verbatim record — the whole point of saving it.
+    if len(children) > 100 and page_id:
+        _append_blocks(page_id, children[100:], token)
+    return {"created": 1, "items": len(items), "error": ""}

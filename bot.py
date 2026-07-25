@@ -11,12 +11,15 @@ Usage:
 
 import asyncio
 import datetime
+import hashlib
 import html
 import json
 import logging
+import logging.handlers
 import os
 import re
 import shutil
+import signal
 import sys
 import urllib.parse
 import urllib.request
@@ -40,6 +43,10 @@ log = logging.getLogger("reel-to-action")
 
 # The watchdog uses this file's mtime to tell "alive and polling" from "stuck".
 HEARTBEAT = PROJECT_DIR / "logs" / "heartbeat"
+
+# Normalized urls currently being processed, so the same reel can't be handled
+# twice concurrently (the startup resume task runs outside Telegram's lock).
+_in_flight: set[str] = set()
 
 
 def load_env() -> None:
@@ -114,12 +121,23 @@ async def run_agent(prompt: str) -> str:
         cwd=PROJECT_DIR,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,  # own process group, so we can kill its MCP children too
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=AGENT_TIMEOUT_S)
     except asyncio.TimeoutError:
-        proc.kill()
-        return "⏰ Timed out after 15 minutes. Try again or check the link."
+        # Killing just the `claude` process leaves its MCP servers running as
+        # orphans; kill the whole group and reap it.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            pass
+        mins = AGENT_TIMEOUT_S // 60
+        return f"⏰ Timed out after {mins} minutes. Try again or check the link."
     if proc.returncode != 0:
         log.error("agent failed (%s): %s", proc.returncode, stderr.decode()[-2000:])
         return f"❌ Agent failed:\n{stderr.decode()[-1500:] or stdout.decode()[-1500:]}"
@@ -176,12 +194,20 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
         sinks.append(asyncio.to_thread(_sync_notion, obj, media, url, transcript, date_iso))
     # A failing sink must NOT abort delivery or skip ledger.put (else the reel is
     # lost: stuck placeholder, never marked done, pending removed → no recovery).
+    sink_errors = []
     for r in await asyncio.gather(*sinks, return_exceptions=True):
         if isinstance(r, Exception):
             log.warning("sink (vault/Notion) failed for %s: %s", url, r)
+            sink_errors.append(str(r))
 
     message = render_telegram(obj, url)
     rich_md = render_rich(obj, url, transcript)
+    if sink_errors:
+        # Tell the user. Previously a failed save was logged and forgotten, so
+        # the note looked saved, the ledger said done, and it was never retried.
+        warn = "⚠️ Couldn't save everywhere: " + "; ".join(e[:200] for e in sink_errors)
+        message += "\n\n" + html.escape(warn)
+        rich_md += "<br><br>" + html.escape(warn)
     ledger.put(url, {
         "status": "done",
         "digest": message,
@@ -556,6 +582,13 @@ async def process(bot, chat_id: int, url: str, force: bool) -> None:
     marked pending for the duration; an interrupted run resumes on next startup.
     """
     norm = acquire.normalize_url(url)
+    # The startup resume task runs outside Telegram's update lock, so the same
+    # reel could be processed twice at once → two agent runs, two Notion rows,
+    # two vault notes.
+    if norm in _in_flight:
+        log.info("already processing %s — skipping duplicate", norm)
+        return
+    _in_flight.add(norm)
     ledger.pending_add(norm, chat_id)
     mid = None
     try:
@@ -586,6 +619,7 @@ async def process(bot, chat_id: int, url: str, force: bool) -> None:
                 pass
     finally:
         ledger.pending_remove(norm)
+        _in_flight.discard(norm)
 
 
 def _write_vault_note(obj: dict, url: str, transcript: str, date_iso: str) -> str:
@@ -595,7 +629,10 @@ def _write_vault_note(obj: dict, url: str, transcript: str, date_iso: str) -> st
     title = (obj.get("title") or "reel").strip()
     safe = re.sub(r"[^\w\- ]", "", title)[:60].strip() or "reel"
     today = date_iso
-    fname = f"{today} {safe}.md"
+    # Short url hash: two untitled reels on the same day would otherwise both be
+    # "<date> reel.md" and silently overwrite each other.
+    stamp = hashlib.sha1(url.encode()).hexdigest()[:6]
+    fname = f"{today} {safe} [{stamp}].md"
     cats = ", ".join(obj.get("categories") or [])
     tags = " ".join("#" + str(t).strip().replace(" ", "_") for t in (obj.get("tags") or []) if t)
     author = (obj.get("author") or "").strip()
@@ -660,23 +697,40 @@ def _write_vault_note(obj: dict, url: str, transcript: str, date_iso: str) -> st
 
 
 def _sync_notion(obj: dict, media: dict, url: str, transcript: str, date_iso: str) -> str:
+    # The agent is told to emit the literal "Author not clear" when unsure, and
+    # that string is truthy — it used to beat the real username the acquirer
+    # already had, leaving the Notion Author column empty.
+    agent_author = (obj.get("author") or "").strip()
+    author = agent_author if notion._ok(agent_author) else (media.get("author") or "")
     res = notion.push_reel(
         obj,
         source_url=url,
         date_iso=date_iso,
         transcript=transcript,
         platform=media.get("platform", ""),
-        author=obj.get("author") or media.get("author") or "",
+        author=author,
     )
     if res["created"]:
         return f"🗂 Notion: 1 reel · {res['items']} items"
-    return "🗂 Notion: failed"
+    # Raise so the caller reports it: a silent failure meant the message looked
+    # perfect, the ledger marked the reel done, and it was never retried.
+    raise RuntimeError(f"Notion save failed: {res.get('error') or 'unknown error'}")
 
 
 def chunked(text: str, size: int = 4000):
-    """Split on newline boundaries so HTML tags (always within one line) stay intact."""
+    """Split on newline boundaries so HTML tags (always within one line) stay intact.
+
+    A single line longer than `size` is hard-split — otherwise it sailed past
+    Telegram's 4096-char limit, send_message raised, and the reel was lost.
+    """
     buf = ""
     for line in text.split("\n"):
+        while len(line) > size:
+            if buf:
+                yield buf
+                buf = ""
+            yield line[:size]
+            line = line[size:]
         if len(buf) + len(line) + 1 > size and buf:
             yield buf
             buf = ""
@@ -735,9 +789,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     force = "/force" in (update.message.text or "")
     _last_url[update.effective_user.id] = urls[-1]
+    chat_id = update.effective_chat.id
+    # Register EVERY url as pending before processing any of them. Telegram is
+    # already acked at this point, so a reel still sitting in the queue when the
+    # bot restarts would otherwise be lost with no record of it.
     for url in urls:
-        log.info("processing %s (force=%s)", url, force)
-        await process(context.bot, update.effective_chat.id, url, force=force)
+        ledger.pending_add(acquire.normalize_url(url), chat_id)
+    if len(urls) > 1:
+        await update.message.reply_text(f"📥 Queued {len(urls)} links — working through them one by one.")
+    for i, url in enumerate(urls, 1):
+        log.info("processing %s (force=%s, %d/%d)", url, force, i, len(urls))
+        await process(context.bot, chat_id, url, force=force)
 
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -748,14 +810,41 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 MAX_RESUME_ATTEMPTS = 3
 
 
+LOG_MAX_BYTES = 20 * 1024 * 1024
+LOG_KEEP_BYTES = 2 * 1024 * 1024
+
+
+def _trim_logs() -> None:
+    """launchd appends our stdout/stderr to files that nothing else rotates —
+    they grow forever. Keep the recent tail and drop the rest.
+    """
+    for name in ("bot.err.log", "bot.out.log", "watchdog.err.log", "watchdog.out.log"):
+        p = PROJECT_DIR / "logs" / name
+        try:
+            if not p.exists() or p.stat().st_size <= LOG_MAX_BYTES:
+                continue
+            with p.open("rb") as f:
+                f.seek(-LOG_KEEP_BYTES, os.SEEK_END)
+                f.readline()  # don't start mid-line
+                tail = f.read()
+            p.write_bytes(tail)
+            log.info("trimmed %s to %.1f MB", name, len(tail) / 1e6)
+        except OSError as e:
+            log.warning("could not trim %s: %s", name, e)
+
+
 async def _heartbeat() -> None:
     """Touch a file every minute so the watchdog can tell alive from stuck."""
     HEARTBEAT.parent.mkdir(exist_ok=True)
+    ticks = 0
     while True:
         try:
             HEARTBEAT.touch()
         except OSError:
             pass
+        if ticks % 60 == 0:  # hourly
+            _trim_logs()
+        ticks += 1
         await asyncio.sleep(60)
 
 

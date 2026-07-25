@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger("reel-to-action.acquire")
@@ -34,20 +35,37 @@ class AcquireError(RuntimeError):
     pass
 
 
-_IG_RE = re.compile(r"instagram\.com/(reel|reels|p|tv)/([A-Za-z0-9_-]+)")
+_IG_RE = re.compile(
+    r"(?:www\.)?instagram\.com/(?:share/)?(reel|reels|p|tv)/([A-Za-z0-9_-]+)")
+# Share links carry per-recipient tracking params that would make the same post
+# a different ledger key every time it's shared.
+_TRACKING = re.compile(r"^(igsh|igshid|xmt|slof|utm_[a-z]+|si|feature|fbclid|gclid)$", re.I)
+_STRIP_QUERY_HOSTS = ("threads.com", "threads.net", "tiktok.com", "instagram.com")
 
 
 def normalize_url(url: str) -> str:
-    """Canonicalize an Instagram link to https://www.instagram.com/<reel|p|tv>/<code>/.
+    """Canonicalize a link so the same post always maps to one ledger key.
 
-    Strips ?igsh=… and other query junk so the same reel maps to one key
-    (for the ledger + Notion dedup). Non-Instagram URLs are returned unchanged.
+    Instagram → https://www.instagram.com/<reel|p|tv>/<code>/ (handles /reels/
+    and /share/ forms). Other known hosts get tracking params stripped. Anything
+    else is returned unchanged.
     """
     url = (url or "").strip()
     m = _IG_RE.search(url)
     if m:
-        kind = "reel" if m.group(1) == "reels" else m.group(1)  # /reels/ and /reel/ are the same post
+        kind = "reel" if m.group(1) == "reels" else m.group(1)  # /reels/ == /reel/
         return f"https://www.instagram.com/{kind}/{m.group(2)}/"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme in ("http", "https") and any(
+                parts.netloc.lower().endswith(h) for h in _STRIP_QUERY_HOSTS):
+            kept = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query)
+                    if not _TRACKING.match(k)]
+            return urllib.parse.urlunsplit(
+                (parts.scheme, parts.netloc, parts.path,
+                 urllib.parse.urlencode(kept), ""))
+    except ValueError:
+        pass
     return url
 
 
