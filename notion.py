@@ -134,7 +134,7 @@ def _prop_value(ptype: str, value) -> dict | None:
     if ptype == "select":
         return {"select": {"name": s[:100]}}
     if ptype == "multi_select":
-        vals = value if isinstance(value, (list, tuple)) else [value]
+        vals = value if isinstance(value, list | tuple) else [value]
         return {"multi_select": [{"name": str(v)[:100]} for v in vals if str(v).strip()]}
     if ptype == "url":
         return {"url": s}

@@ -281,9 +281,9 @@ def _sanitize(obj: dict) -> dict:
     for key in _STR_LISTS:
         val = obj.get(key)
         if isinstance(val, list):
-            obj[key] = [str(v).strip() for v in val if isinstance(v, (str, int, float)) and str(v).strip()]
+            obj[key] = [str(v).strip() for v in val if isinstance(v, str | int | float) and str(v).strip()]
         elif val is not None:
-            obj[key] = [str(val)] if isinstance(val, (str, int, float)) else []
+            obj[key] = [str(val)] if isinstance(val, str | int | float) else []
     for key in ("items", "slides"):
         val = obj.get(key)
         obj[key] = [v for v in val if isinstance(v, dict)] if isinstance(val, list) else []
