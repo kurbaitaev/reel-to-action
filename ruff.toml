@@ -1,0 +1,23 @@
+# Explicit rule set so lint results don't change when ruff updates — CI was
+# green locally and red in Actions purely because of a version difference.
+line-length = 110
+target-version = "py310"
+
+[lint]
+select = [
+    "E4",   # imports
+    "E7",   # statement/comparison errors
+    "E9",   # syntax / IO errors
+    "F",    # pyflakes: unused imports & names, f-string bugs
+    "I",    # import sorting
+    "UP",   # outdated syntax for our target version
+    "B",    # likely bugs (bugbear)
+]
+ignore = [
+    "B008",  # function call in default arg — not a pattern we use
+    "B904",  # raise ... from — deliberate where the cause adds no signal
+]
+
+[lint.per-file-ignores]
+# Tests reassign module-level paths to temp dirs and stub network calls.
+"tests/*" = ["E402", "I001"]
