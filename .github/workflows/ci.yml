@@ -18,7 +18,7 @@ jobs:
         # 3.10 is the floor (PEP-604 unions in signatures).
         python-version: ["3.10", "3.13"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
@@ -43,7 +43,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Check shell scripts
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
