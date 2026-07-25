@@ -1,22 +1,18 @@
 {
+  "_comment": "Permissions for the headless agent that turns a reel into a note. Deliberately minimal: it reads downloaded images, searches the web to verify links, and returns JSON. It does not need shell access or write access anywhere — reel captions are untrusted text, so anything granted here is reachable by a hostile caption.",
   "permissions": {
     "allow": [
       "Read(//tmp/reel-to-action/**)",
-      "Edit(//tmp/reel-to-action/**)",
-      "Read(//Users/kurbaitaev/Documents/Obsidian Vault/**)",
-      "Edit(//Users/kurbaitaev/Random Folder/reel-to-action/vault/**)",
-      "Edit(//Users/kurbaitaev/Random Folder/reel-to-action/runtime/**)",
-      "Read(//Users/kurbaitaev/Random Folder/reel-to-action/runtime/**)",
       "Grep",
       "Glob",
       "WebSearch",
       "WebFetch",
       "ToolSearch",
+      "mcp__firecrawl__firecrawl_search",
+      "mcp__firecrawl__firecrawl_scrape",
       "mcp__gemini-analyze__transcribe_video",
       "mcp__gemini-analyze__analyze_video",
-      "mcp__gemini-analyze__validate_key",
-      "mcp__firecrawl__firecrawl_search",
-      "mcp__firecrawl__firecrawl_scrape"
+      "mcp__gemini-analyze__validate_key"
     ],
     "deny": []
   }

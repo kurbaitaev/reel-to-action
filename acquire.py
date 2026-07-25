@@ -105,6 +105,14 @@ def video_frames(video_path: str, short: str, n: int) -> list:
     return frames
 
 
+def _ytdlp_version() -> str:
+    try:
+        return subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True,
+                              timeout=20).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def sweep_stale(max_age_h: int = 24) -> None:
     """Backstop for media left behind by a crashed run — without it the temp dir
     grows forever and stale files can be mistaken for the current reel's."""
@@ -147,9 +155,17 @@ def acquire(url: str) -> dict:
     sweep_stale()
     token = os.environ.get("APIFY_TOKEN", "").strip()
     if is_instagram(url) and token:
-        return _acquire_apify_instagram(url, token)
+        # Apify is the paid-but-reliable path (it also returns a spoken transcript).
+        # If it fails, yt-dlp still gets the media — better a note without speech
+        # than no note at all.
+        try:
+            return _acquire_apify_instagram(url, token)
+        except AcquireError as e:
+            log.warning("Apify path failed (%s) — falling back to yt-dlp", e)
+            return _acquire_ytdlp(url)
     if is_instagram(url) and not token:
-        log.warning("Instagram URL but APIFY_TOKEN unset — falling back to yt-dlp (may be IP-blocked)")
+        log.info("No APIFY_TOKEN — using yt-dlp (no spoken transcript; "
+                 "notes rely on the caption and on-screen text)")
     return _acquire_ytdlp(url)
 
 
@@ -295,9 +311,24 @@ def _acquire_ytdlp(url: str) -> dict:
             cwd=run_dir, check=True, capture_output=True, text=True, timeout=300,
         )
     except subprocess.CalledProcessError as e:
-        raise AcquireError(f"yt-dlp failed: {e.stderr[-500:]}") from e
+        err = e.stderr or ""
+        # Instagram's extractor was reworked in yt-dlp 2026.07.04; older builds
+        # fail this exact way on public reels, and the fix is just an upgrade.
+        if "empty media response" in err:
+            raise AcquireError(
+                f"yt-dlp {_ytdlp_version() or '?'} is too old for Instagram. "
+                "Run: brew upgrade yt-dlp  (needs 2026.07.04 or newer)"
+            ) from e
+        if "login" in err.lower() or "rate-limit" in err.lower():
+            raise AcquireError(
+                "Instagram refused the request (rate limit or login wall). Wait a few "
+                "minutes and retry. Don't add cookies — that risks your account."
+            ) from e
+        raise AcquireError(f"yt-dlp failed: {err[-500:]}") from e
     except FileNotFoundError as e:
-        raise AcquireError("yt-dlp not installed") from e
+        raise AcquireError("yt-dlp is not installed — run: brew install yt-dlp") from e
+    except subprocess.TimeoutExpired as e:
+        raise AcquireError("yt-dlp timed out after 5 minutes") from e
 
     info = sorted(run_dir.glob("*.info.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     meta = json.loads(info[0].read_text()) if info else {}

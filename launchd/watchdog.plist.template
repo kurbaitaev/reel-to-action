@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated into ~/Library/LaunchAgents by install.sh. Placeholders: __LABEL__ __PYTHON__ __DIR__ __HOME__ -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL__-watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__DIR__/watchdog.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__DIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Every 90 minutes. -->
+    <key>StartInterval</key>
+    <integer>5400</integer>
+    <key>StandardOutPath</key>
+    <string>__DIR__/logs/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__DIR__/logs/watchdog.err.log</string>
+</dict>
+</plist>

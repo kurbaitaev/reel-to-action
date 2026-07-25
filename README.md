@@ -1,59 +1,150 @@
 # reel-to-action
 
-Send a link (Instagram reel, YouTube, TikTok, article) to your Telegram bot → get back actionable items: podcasts with real links, books, tools/Claude skills to try, concrete advice — personalized against your Obsidian vault and saved into `Action Inbox/` there.
+Send an Instagram reel to your own Telegram bot. Get back a clean, permanent note — and keep it after the post disappears.
 
-**Architecture:** `bot.py` is a thin Telegram poller. For each link it:
-1. **Acquires** the media in deterministic Python ([acquire.py](acquire.py)) — Instagram via an **Apify** actor (proxied, anti-bot), everything else via yt-dlp fallback.
-2. **Reasons** by spawning a headless Claude Code agent (`claude -p`, instructions in [agent_prompt.md](agent_prompt.md)) with the transcript/caption already in hand: it transcribes the local video (Gemini), extracts typed items, finds real links via web search, checks relevance against your vault, and writes the note.
-3. Replies with a digest and records the result in [ledger.json](ledger.json) so the same link isn't reprocessed (send a message containing `/force` to redo).
+Saved reels are a graveyard. You bookmark something useful, and three weeks later you can't find it, can't remember which one had the book recommendation, and half of them have been deleted by the creator. This turns each one into a note you actually own: what it said, word for word, plus real links to every book, podcast, tool or concept it mentioned.
 
-Agent permissions are scoped in [.claude/settings.json](.claude/settings.json). Keeping acquisition out of the agent makes it cheaper, more reliable, and ready to lift into a hosted backend.
+It reads the pictures too — a reel that shows a book cover on screen but never says the title still gets that book in the note, with a verified link.
 
-## Setup (5 min)
+Everything lands in a local markdown vault (Obsidian-compatible), optionally in a Notion database, and back in your Telegram chat.
 
-0. **Log in the Claude CLI** (currently it returns 401 in headless mode): open a terminal, run `claude`, then `/login`. Verify with:
-   ```bash
-   claude -p "Reply with exactly: OK"
-   ```
-1. **Create the bot**: message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
-2. **Configure**:
-   ```bash
-   cp .env.example .env   # paste the token
-   ```
-3. **Run**:
-   ```bash
-   python3 bot.py
-   ```
-4. Send `/start` to your bot — it replies with your user id. Put that id into `ALLOWED_USER_IDS` in `.env` and restart. **Don't skip this** — until then anyone who discovers the bot can trigger agent runs on your Mac.
-5. Send it a reel link. First reply takes 2–5 min.
+> **Runs on your Mac, for you.** This is a single-user personal tool, not a hosted service. Your reels and notes never leave your machine except to the APIs you configure.
 
-To test the pipeline without Telegram:
+## What a note looks like
+
+From a reel where an investor lists books he gives away:
+
+> **Bill Gurley's 3 Most-Gifted Books**
+>
+> 📌 **Recommended**
+> 1. ✅ [Complexity: The Emerging Science at the Edge of Order and Chaos](https://www.goodreads.com/book/show/337123.Complexity) — M. Mitchell Waldrop
+> 2. ✅ [Mr. China](https://www.goodreads.com/book/show/109705.Mr_China) — Tim Clissold
+> 3. ✅ [Range: Why Generalists Triumph in a Specialized World](https://www.goodreads.com/book/show/41795733-range) — David Epstein
+> 4. ✅ [Runnin' Down a Dream: How to Thrive in a Career You Actually Love](https://www.goodreads.com/book/show/237134711-runnin-down-a-dream) — Bill Gurley
+>
+> 💾 *Curated reading list from a top venture capitalist…*
+> 📄 Full transcript (collapsed)
+
+The fourth book is never spoken aloud — it's on a cover shown on screen. ✅ means the link was checked; ⚠️ means it couldn't be confirmed, and the note says so rather than guessing.
+
+## How it works
+
+`bot.py` is a thin Telegram poller. Per link:
+
+1. **Acquire** ([acquire.py](acquire.py)) — deterministic Python, no model involved. Downloads the media and metadata, and samples frames from the video with ffmpeg so on-screen text can be read. Carousels and photo posts download every image.
+2. **Reason** — spawns a headless [Claude Code](https://claude.com/product/claude-code) agent (`claude -p`, instructions in [agent_prompt.md](agent_prompt.md)). It reads the transcript and every image, detects what kind of content it is, and web-searches to verify each link. It returns exactly one JSON object; it writes no files.
+3. **Save** — `bot.py` renders the note and writes it to the vault, to Notion ([notion.py](notion.py)), and to Telegram. A ledger prevents reprocessing (send `/force` to redo).
+
+Acquisition is kept out of the agent on purpose: it's the fragile, infrastructure-heavy part, and it belongs in code you can debug.
+
+## Setup
+
+**Requires macOS** (launchd for the service, Apple's ffmpeg build, Claude Code CLI) and **Python 3.10+**.
+
+```bash
+git clone https://github.com/kurbaitaev/reel-to-action.git
+cd reel-to-action
+pip install -r requirements.txt
+brew install yt-dlp ffmpeg
+cp .env.example .env
+python3 doctor.py          # tells you exactly what's still missing
+```
+
+`doctor.py` is the fastest way to find out whether you're ready — it checks every dependency and prints the fix for each.
+
+You need three things in `.env`:
+
+1. **`TELEGRAM_BOT_TOKEN`** — message [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
+2. **Claude access** — either run `claude` once and `/login` (uses your Claude subscription), or set `ANTHROPIC_API_KEY` (bills per token, and never expires — see [Which to use](#claude-login-vs-api-key)).
+3. **`ALLOWED_USER_IDS`** — start the bot, send it `/start`, and it replies with your numeric id. Put that in `.env` and restart. **The bot refuses everyone until you do this**, on purpose: an open bot lets anyone who finds the token run processes on your Mac.
+
+Then:
+
+```bash
+python3 bot.py
+```
+
+Send it a reel. The first note takes 1–3 minutes.
+
+To try the pipeline without Telegram:
+
 ```bash
 python3 bot.py --test "https://www.instagram.com/reel/..."
 ```
 
-## Keeping it running (launchd — installed)
+### One-time trust step
 
-The bot runs as a launchd **LaunchAgent** (`~/Library/LaunchAgents/com.kurbaitaev.reel-to-action.plist`): it starts on login and auto-restarts if it crashes. The Mac still has to be powered on and logged in (a LaunchAgent only runs in your GUI session — that's required so it can read your Claude credentials from the login Keychain).
+The agent's permissions live in [.claude/settings.json](.claude/settings.json), and Claude Code ignores them in a directory you haven't trusted. Run `claude` once inside the project folder and accept the trust prompt — otherwise web search is silently disabled and links come back unverified. The watchdog re-checks this and repairs it if a future login resets it.
 
-Manage it with `./ctl.sh`:
+## Keeping it running
+
 ```bash
-./ctl.sh status     # is it running? pid? last exit code
-./ctl.sh restart    # after editing bot.py / agent_prompt.md
-./ctl.sh stop
-./ctl.sh start
-./ctl.sh logs       # dump logs
-./ctl.sh tail       # follow logs live
+./install.sh        # installs two launchd services: the bot + a watchdog
+./ctl.sh status     # running? pid? last exit code
+./ctl.sh restart    # after editing bot.py or agent_prompt.md
+./ctl.sh tail       # follow the log
 ```
 
-**Auto-recovery:** while a reel is processing it's recorded in `pending.json`. If the bot is killed mid-reel (restart, Mac sleep, network drop), the entry survives and the bot **re-processes it automatically on next startup** — reels are no longer silently dropped. Transient network errors are caught by a registered handler and retried rather than crashing.
+The watchdog ([watchdog.py](watchdog.py)) checks every 90 minutes that the bot is alive *and* still polling, restarts it if not, and sends you a Telegram ping either way. It also repairs the trust flag above and warns you if your Claude login has genuinely expired.
 
-**Heads-up — Claude token expiry:** the agent uses your Claude Code OAuth login, which expires every ~few months. When digests start failing with a 401, run `claude` → `/login` once and it resumes (no need to touch the service). To avoid this entirely, set `ANTHROPIC_API_KEY` and the agent will use that instead (bills per-token rather than via your Max plan).
+These are **LaunchAgents**, so they only run while you're logged in and the Mac is awake. That's a requirement, not an oversight: the Claude CLI reads its login from your login keychain, which isn't available to a system daemon.
 
-## Notes & current limits
+If a reel is interrupted mid-processing (restart, sleep, crash), it's recorded in `pending.json` and retried on the next start — up to three times, then it tells you it gave up.
 
-- **Cost**: each link is one headless Claude Code run on your existing Claude login.
-- **Transcription**: prefers your `gemini-analyze` MCP; falls back to direct Gemini API if `GEMINI_API_KEY` is set in `.env`.
-- **Structured output & formatting**: the agent emits a single `@@JSON@@…@@END@@` object (`summary`, `note`, `items[]`). `bot.py` renders the Telegram message from it as **HTML** — bold section headers, item titles hyperlinked (so raw URLs never show), special chars escaped — and `notion.py` writes one row per item to the Notion database (`NOTION_TOKEN` + `NOTION_DATABASE_ID` in `.env`; skipped silently if unset). Database columns: Name / Type / Status / Source / Link / Author / Why it matters / Date.
-- **Calendar booking**: v1 *suggests* time blocks in the digest; auto-booking via Calendar MCP has the same headless-auth caveat as Notion.
-- **Storage is local, not iCloud.** Action items are written to `reel-to-action/vault/Action Inbox/` (inside this project, on the laptop). The iCloud-synced `~/Documents/Obsidian Vault` is used **read-only** for personalization context — the bot never writes there. Paths are in `agent_prompt.md`; to browse the output in Obsidian, open `reel-to-action/vault/` as a vault.
+## Configuration
+
+Everything optional lives in [.env.example](.env.example) with comments. The ones worth knowing:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `APIFY_TOKEN` | *(unset)* | Paid. Adds a **spoken transcript** and is more reliable than yt-dlp. Without it everything still works — see below. |
+| `NOTION_TOKEN` + `NOTION_DATABASE_ID` | *(unset)* | Sync notes to a Notion database. Skipped silently if unset. |
+| `CLAUDE_MODEL` | *(your default)* | e.g. `claude-sonnet-4-6`. A stronger model gets links right more often. |
+| `VIDEO_FRAMES` | `6` | Frames sampled per video for on-screen text. `0` disables. |
+| `RICH_MESSAGE` | `1` | Telegram Rich Messages. Set `0` for plain HTML. |
+| `SERVICE_LABEL` | `com.<user>.reel-to-action` | launchd service name. |
+
+### Free vs. paid
+
+**It runs with no paid services at all.** yt-dlp fetches public reels anonymously, ffmpeg samples the frames, and the agent reads them. What you lose without `APIFY_TOKEN` is the **spoken transcript** — notes are built from the caption and on-screen text, and the note says so plainly instead of pretending. For a lot of reels (lists, carousels, text-on-screen) that's barely a downgrade; for a talking-head interview it is.
+
+yt-dlp's Instagram support **needs 2026.07.04 or newer** — older builds fail with "empty media response". `doctor.py` checks the version for you.
+
+**Do not add Instagram cookies.** People get their accounts permanently banned for scraping with them, including on their own posts. Public reels don't need them.
+
+### Claude login vs. API key
+
+| | Subscription (`claude` → `/login`) | `ANTHROPIC_API_KEY` |
+|---|---|---|
+| Cost | Included in your plan | ~$0.05–0.10 per reel |
+| Expiry | **Expires every few months** — the bot stops until you log in again | Never |
+| Best for | Trying it out | Leaving it running |
+
+The watchdog warns you when a login expires, but the API key is the set-and-forget option.
+
+## Notion setup (optional)
+
+Create a database, share it with an internal integration ([notion.so/my-integrations](https://www.notion.so/my-integrations)), and put the token and database id in `.env`.
+
+You don't have to match a schema. `notion.py` reads your database's live columns and only fills the ones that exist, so you can rename and add freely. It looks for: `Source` (url), `Date` (date), `Author`, `Platform`, `Summary`, `Hook / key idea`, `Takeaways`, `Category` (multi-select), `Items`. **`Source` as a url column is the one worth adding** — deduplication and date preservation use it.
+
+## Security notes
+
+Reel captions, transcripts and web pages are **untrusted text written by strangers**, and they go into a prompt for an agent with tools. Two consequences:
+
+- The agent's permission list is deliberately minimal — read the downloaded images, search the web, return JSON. **No shell access, no write access.** If you add tools there, a hostile caption can reach them.
+- `ALLOWED_USER_IDS` fails closed.
+
+The bot's own logs are gitignored, and `.env` is never committed. Telegram request URLs contain your bot token, so httpx logging is turned down to keep it out of the log file.
+
+## Limitations
+
+- **macOS only.** The service layer is launchd; the rest is portable but untested elsewhere.
+- **Instagram-focused.** Other links (YouTube, TikTok, articles) go through yt-dlp and mostly work, but the note templates are tuned for reels.
+- **Acquisition breaks periodically.** Instagram changes things; yt-dlp catches up within days. Keep it updated.
+- **Single user.** One person, one machine, a JSON-file ledger. Sharing it with friends means one install each.
+- Verified links are checked by an LLM with web search. ✅ means it found a canonical page — not a human guarantee.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

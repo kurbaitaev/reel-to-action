@@ -77,8 +77,10 @@ def build_prompt(url: str, media: dict) -> str:
         )
     elif media.get("video_path"):
         ctx.append(
-            f"No transcript. Video downloaded at: {media['video_path']} — transcribe it with "
-            f"the gemini-analyze MCP (do NOT run yt-dlp)."
+            f"No speech transcript. Video downloaded at: {media['video_path']} — transcribe it "
+            "with the gemini-analyze MCP if you have it. If that MCP is unavailable, do NOT try "
+            "to transcribe another way: rely on the frames and caption, and say plainly in "
+            "`description` that the spoken audio wasn't available. (Never run yt-dlp.)"
         )
     elif not media.get("frames"):
         ctx.append("No transcript/images — use the caption; fetch the URL if it's an article.")
@@ -693,7 +695,10 @@ from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandl
 def allowed(update: Update) -> bool:
     ids = os.environ.get("ALLOWED_USER_IDS", "").strip()
     if not ids:
-        return True  # open until configured — set ALLOWED_USER_IDS in .env!
+        # Fail CLOSED. An unrestricted bot lets anyone who finds the token run
+        # agent processes on your machine, so refuse until it's configured.
+        log.warning("ALLOWED_USER_IDS is not set — refusing everyone. Set it in .env.")
+        return False
     return str(update.effective_user.id) in {x.strip() for x in ids.split(",")}
 
 
