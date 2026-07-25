@@ -123,12 +123,25 @@ def video_frames(video_path: str, short: str, n: int) -> list:
     return frames
 
 
+YTDLP_MIN = (2026, 7, 4)  # Instagram extractor rework — older builds can't fetch reels
+
+
 def _ytdlp_version() -> str:
     try:
         return subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True,
                               timeout=20).stdout.strip()
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _ytdlp_too_old() -> bool:
+    """Compare numerically — '2026.7.4' and '2026.07.04' are the same release,
+    so a string comparison would be wrong."""
+    try:
+        parts = tuple(int(x) for x in _ytdlp_version().split(".")[:3])
+        return len(parts) == 3 and parts < YTDLP_MIN
+    except (ValueError, TypeError):
+        return False  # unknown version → don't blame it
 
 
 def sweep_stale(max_age_h: int = 24) -> None:
@@ -333,9 +346,16 @@ def _acquire_ytdlp(url: str) -> dict:
         # Instagram's extractor was reworked in yt-dlp 2026.07.04; older builds
         # fail this exact way on public reels, and the fix is just an upgrade.
         if "empty media response" in err:
+            # Same symptom, two very different causes — don't misdiagnose.
+            if _ytdlp_too_old():
+                raise AcquireError(
+                    f"yt-dlp {_ytdlp_version()} is too old for Instagram. "
+                    "Run: brew upgrade yt-dlp  (needs 2026.07.04 or newer)"
+                ) from e
             raise AcquireError(
-                f"yt-dlp {_ytdlp_version() or '?'} is too old for Instagram. "
-                "Run: brew upgrade yt-dlp  (needs 2026.07.04 or newer)"
+                "Instagram returned nothing for this post — it may be private, deleted, "
+                "or yt-dlp's Instagram support just broke again (it does periodically). "
+                "Try `brew upgrade yt-dlp`; if it's already current, wait for a fix."
             ) from e
         if "login" in err.lower() or "rate-limit" in err.lower():
             raise AcquireError(

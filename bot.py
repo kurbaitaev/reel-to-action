@@ -25,6 +25,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
 import acquire
 import ledger
 import notion
@@ -740,10 +744,6 @@ def chunked(text: str, size: int = 4000):
 
 
 # --- Telegram handlers ---------------------------------------------------
-
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
 
 
 def allowed(update: Update) -> bool:
