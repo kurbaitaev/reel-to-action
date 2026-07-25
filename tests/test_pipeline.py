@@ -6,6 +6,7 @@
 No network, no Apify, no Telegram — Apify calls are stubbed.
 """
 
+import json
 import pathlib
 import sys
 import tempfile
@@ -51,6 +52,37 @@ def test_search_urls_never_count_as_verified():
 
 
 # --- Telegram delivery ---------------------------------------------------
+
+def test_blocks_use_native_structure_and_no_raw_html():
+    obj = {
+        "content_type": "book_recommendation",
+        "title": "Books & Ideas",              # & must not arrive as &amp;
+        "quote": "a quote",
+        "author": "Someone",
+        "items": [{"name": "Range", "author": "David Epstein",
+                   "link": "https://www.goodreads.com/book/show/41795733-range",
+                   "verified": True}],
+        "why_save": "worth keeping",
+        "tags": ["books", "investing"],
+    }
+    payload = bot.render_blocks(obj, "https://instagram.com/reel/X/", "line one\nline two")
+    types = [b["type"] for b in payload["blocks"]]
+    for expected in ("heading", "list", "blockquote", "divider", "details", "footer"):
+        assert expected in types, f"missing {expected} block"
+
+    flat = json.dumps(payload)
+    # _layout() escapes for the HTML renderers; blocks must carry raw text.
+    assert "&amp;" not in flat and "<b>" not in flat, "HTML leaked into native blocks"
+
+    # A verified item must be a real link, and list items wrap blocks (not text).
+    lst = next(b for b in payload["blocks"] if b["type"] == "list")
+    assert "blocks" in lst["items"][0]
+    assert any(p.get("type") == "url" for p in json.loads(flat)["blocks"][
+        types.index("list")]["items"][0]["blocks"][0]["text"] if isinstance(p, dict))
+
+    details = next(b for b in payload["blocks"] if b["type"] == "details")
+    assert details["summary"] and details["blocks"], "details needs summary + blocks"
+
 
 def test_long_line_is_split_under_the_limit():
     # A single long line used to exceed Telegram's 4096 cap → BadRequest → lost reel.

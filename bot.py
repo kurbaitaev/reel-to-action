@@ -149,8 +149,8 @@ async def run_agent(prompt: str) -> str:
 
 
 async def run_pipeline(url: str, force: bool = False, on_progress=None,
-                       media: dict | None = None) -> tuple[str, str | None]:
-    """Acquire → reason → persist. Returns (html_message, rich_markdown_or_None).
+                       media: dict | None = None) -> tuple[str, str | None, dict | None]:
+    """Acquire → reason → persist. Returns (html_message, rich_html_or_None, blocks_or_None).
 
     on_progress(stage) is an optional async callback fired at real milestones
     ("acquired") so the caller can update a status message in place.
@@ -161,7 +161,9 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
     if cached and cached.get("status") == "done" and not force:
         note = "\n\n(already processed — send /force to redo)"
         md = cached.get("markdown")
-        return cached["digest"] + note, (md + "\n\n*(already processed — /force to redo)*" if md else None)
+        return (cached["digest"] + note,
+                (md + "<br><br><i>(already processed — /force to redo)</i>" if md else None),
+                cached.get("blocks"))
 
     if media is None:
         # Acquisition is blocking I/O — keep the event loop free.
@@ -169,19 +171,19 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
             media = await asyncio.to_thread(acquire.acquire, url)
         except acquire.AcquireError as e:
             log.error("acquire failed for %s: %s", url, e)
-            return f"❌ Couldn't fetch that link:\n{e}", None
+            return f"❌ Couldn't fetch that link:\n{e}", None, None
 
     if on_progress:
         await on_progress("acquired")
     raw = await run_agent(build_prompt(url, media))
     if raw.startswith(("❌", "⏰")):
-        return html.escape(raw), None
+        return html.escape(raw), None, None
 
     obj = _parse_output(raw)
     if obj is None:
         # Couldn't parse structured output — send the cleaned text as-is.
         log.warning("no @@JSON@@ block in agent output for %s", url)
-        return html.escape(JSON_RE.sub("", raw).strip()), None
+        return html.escape(JSON_RE.sub("", raw).strip()), None, None
 
     obj = _sanitize(obj)
     n_bad = _validate_links(obj)
@@ -206,6 +208,12 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
 
     message = render_telegram(obj, url)
     rich_md = render_rich(obj, url, transcript)
+    try:
+        rich_blocks = render_blocks(obj, url, transcript)
+    except Exception as e:  # noqa: BLE001
+        # Native blocks are the nicest rendering, not a requirement — fall back.
+        log.warning("block rendering failed for %s: %s", url, e)
+        rich_blocks = None
     if sink_errors:
         # Tell the user. Previously a failed save was logged and forgotten, so
         # the note looked saved, the ledger said done, and it was never retried.
@@ -216,6 +224,7 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
         "status": "done",
         "digest": message,
         "markdown": rich_md,
+        "blocks": rich_blocks,
         "platform": media.get("platform"),
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
     })
@@ -228,7 +237,7 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
         v = _dedupe_vault_by_source(url)
         if n or v:
             log.info("redo cleanup for %s: archived %d notion, removed %d vault dup(s)", url, n, v)
-    return message, rich_md
+    return message, rich_md, rich_blocks
 
 
 def _dedupe_vault_by_source(url: str) -> int:
@@ -533,6 +542,116 @@ def _bot_api(method: str, params: dict) -> dict:
         return json.load(r)
 
 
+# --- Rich Message blocks (Bot API 10.2) ----------------------------------
+# Grammar verified empirically against the live API on 2026-07-25 (the docs
+# describe the classes but not the wire format):
+#   message  {"blocks": [block, ...]}
+#   block    {"type": "heading",    "size": 1..4, "text": RichText}
+#            {"type": "paragraph",  "text": RichText}
+#            {"type": "divider"}
+#            {"type": "list",       "items": [{"blocks": [block]}]}   always bulleted
+#            {"type": "blockquote", "blocks": [block]}                NOT "text"
+#            {"type": "details",    "summary": str, "blocks": [block]}  NOT "header"
+#            {"type": "footer",     "text": RichText}   hashtags auto-linked
+#   RichText str | [str | {"type": "bold"|"italic"|"code"|"url", "text": …, "url": …}]
+# Unsupported despite appearing in the docs: section_heading, block_quotation,
+# pull_quotation, preformatted, thinking.
+
+def _para_block(text) -> dict:
+    return {"type": "paragraph", "text": text}
+
+
+def _ue(s: str) -> str:
+    """_layout() HTML-escapes for the HTML renderers; blocks take raw text."""
+    return html.unescape(s or "")
+
+
+def _plain(s: str) -> str:
+    """Strip the HTML that _layout bakes into section headers."""
+    return re.sub(r"<[^>]+>", "", _ue(s)).strip()
+
+
+def _rec_richtext(it: dict) -> list:
+    """One recommendation as inline rich text: mark, linked title, author, note."""
+    name = (it.get("name") or "").strip()
+    link = (it.get("link") or "").strip()
+    parts: list = ["✅ " if it.get("verified") else "⚠️ "]
+    if link.lower().startswith(("http://", "https://")):
+        parts.append({"type": "url", "text": name, "url": link})
+    else:
+        parts.append({"type": "bold", "text": name})
+    author = (it.get("author") or "").strip()
+    if author and author.lower() not in _NA:
+        parts.append({"type": "italic", "text": f" — {author}"})
+    note = (it.get("verify_note") or "").strip()
+    if note:
+        parts.append({"type": "italic", "text": f" · {note}"})
+    return parts
+
+
+def _list_block(rich_items: list) -> dict:
+    return {"type": "list", "items": [{"blocks": [_para_block(t)]} for t in rich_items]}
+
+
+def render_blocks(obj: dict, url: str = "", transcript: str = "") -> dict:
+    """Build a native Rich Message: real headings, lists, quotes and a
+    collapsible transcript — instead of one HTML blob."""
+    blocks: list[dict] = []
+    for tag, payload in _layout(obj):
+        if tag == "hero":
+            q, a = payload
+            inner = [_para_block([{"type": "bold", "text": f"“{_ue(q)}”"}])]
+            if a:
+                inner.append(_para_block([{"type": "italic", "text": f"— {_ue(a)}"}]))
+            blocks.append({"type": "blockquote", "blocks": inner})
+        elif tag == "title":
+            blocks.append({"type": "heading", "size": 1, "text": _ue(payload)})
+        elif tag in ("sub", "para"):
+            blocks.append(_para_block([{"type": "italic", "text": _ue(payload)}]))
+        elif tag == "takeaway":
+            blocks.append(_para_block(["💡 ", {"type": "bold", "text": _ue(payload)}]))
+        elif tag == "usefulfor":
+            blocks.append(_para_block([{"type": "italic", "text": f"Useful for: {_ue(payload)}"}]))
+        elif tag == "body":
+            blocks.append(_para_block(_ue(payload)))
+        elif tag == "section":
+            header, kind, items = payload
+            if header:
+                blocks.append({"type": "heading", "size": 3, "text": _plain(header)})
+            if kind == "rec":
+                rows = [_rec_richtext(it) for it in items if (it.get("name") or "").strip()]
+                blocks.append(_list_block(rows) if rows
+                              else _para_block([{"type": "italic",
+                                                 "text": "Not clear from the Reel."}]))
+            elif kind == "bullets":
+                blocks.append(_list_block([str(p).strip() for p in items if str(p).strip()]))
+            else:  # steps are ordered, and lists are always bulleted — number them
+                for i, s in enumerate([str(s).strip() for s in items if str(s).strip()], 1):
+                    blocks.append(_para_block([{"type": "bold", "text": f"{i}. "}, s]))
+    if _ok(obj.get("why_save")):
+        blocks.append({"type": "blockquote",
+                       "blocks": [_para_block(f"💾 {obj['why_save'].strip()}")]})
+    if url:
+        blocks.append({"type": "divider"})
+        blocks.append(_para_block([{"type": "url", "text": "🔗 Original reel", "url": url}]))
+    detail = _detail_text(obj, transcript)
+    if detail:
+        # Rebuild from raw text: _detail_text is HTML for the other renderers.
+        paras = [p.strip() for p in re.split(r"<br\s*/?>|\n", _plain(detail)) if p.strip()]
+        if paras:
+            blocks.append({"type": "details", "summary": "📄 Full transcript",
+                           "blocks": [_para_block(p) for p in paras[:60]]})
+    tags = [str(t).strip().lstrip("#").replace(" ", "_") for t in (obj.get("tags") or []) if t]
+    if tags:
+        blocks.append({"type": "footer", "text": " ".join("#" + t for t in tags)})
+    return {"blocks": blocks}
+
+
+def _status_payload(text: str) -> dict:
+    """A one-line status message (placeholder / progress) as a rich payload."""
+    return {"blocks": [_para_block([{"type": "bold", "text": text}])]}
+
+
 async def _send_rich(chat_id: int, body_html: str) -> bool:
     """Send a Rich Message (HTML body). True on success."""
     params = {"chat_id": chat_id, "rich_message": json.dumps({"html": body_html}),
@@ -544,9 +663,14 @@ async def _send_rich(chat_id: int, body_html: str) -> bool:
         return False
 
 
-async def _send_rich_id(chat_id: int, body_html: str) -> int | None:
+def _rich_param(payload) -> str:
+    """payload is either a blocks dict (preferred) or an HTML string (legacy)."""
+    return json.dumps(payload if isinstance(payload, dict) else {"html": payload})
+
+
+async def _send_rich_id(chat_id: int, payload) -> int | None:
     """Send a Rich Message and return its message_id (for later edit-in-place)."""
-    params = {"chat_id": chat_id, "rich_message": json.dumps({"html": body_html}),
+    params = {"chat_id": chat_id, "rich_message": _rich_param(payload),
               "disable_web_page_preview": "true"}
     try:
         r = await asyncio.to_thread(_bot_api, "sendRichMessage", params)
@@ -556,22 +680,35 @@ async def _send_rich_id(chat_id: int, body_html: str) -> int | None:
         return None
 
 
-async def _edit_rich(chat_id: int, message_id: int, body_html: str) -> bool:
+async def _edit_rich(chat_id: int, message_id: int, payload) -> bool:
     """Edit a Rich Message in place (editMessageText + rich_message)."""
     params = {"chat_id": chat_id, "message_id": message_id,
-              "rich_message": json.dumps({"html": body_html}),
+              "rich_message": _rich_param(payload),
               "disable_web_page_preview": "true"}
     try:
         return bool((await asyncio.to_thread(_bot_api, "editMessageText", params)).get("ok"))
     except Exception as e:  # noqa: BLE001
-        log.debug("editMessageText failed (%s)", e)
+        log.warning("editMessageText failed (%s)", e)
         return False
 
 
-async def deliver(bot, chat_id: int, html_msg: str, rich_md: str | None) -> None:
-    """Fresh send (no existing message to edit): rich if possible, else chunked HTML."""
-    if rich_md and os.environ.get("RICH_MESSAGE", "1") == "1":
-        if await _send_rich(chat_id, rich_md):
+async def _send_rich_payload(chat_id: int, payload: dict) -> bool:
+    params = {"chat_id": chat_id, "rich_message": json.dumps(payload),
+              "disable_web_page_preview": "true"}
+    try:
+        return bool((await asyncio.to_thread(_bot_api, "sendRichMessage", params)).get("ok"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("sendRichMessage(blocks) failed (%s) — falling back", e)
+        return False
+
+
+async def deliver(bot, chat_id: int, html_msg: str, rich_md: str | None,
+                  rich_blocks: dict | None = None) -> None:
+    """Fresh send: native blocks → rich HTML → chunked plain HTML."""
+    if os.environ.get("RICH_MESSAGE", "1") == "1":
+        if rich_blocks and await _send_rich_payload(chat_id, rich_blocks):
+            return
+        if rich_md and await _send_rich(chat_id, rich_md):
             return
     for part in chunked(html_msg):
         await bot.send_message(chat_id, part, parse_mode=ParseMode.HTML,
@@ -597,20 +734,21 @@ async def process(bot, chat_id: int, url: str, force: bool) -> None:
     mid = None
     try:
         rich = os.environ.get("RICH_MESSAGE", "1") == "1"
-        mid = await _send_rich_id(chat_id, "<b>⏳ Working on your reel…</b>") if rich else None
+        mid = await _send_rich_id(chat_id, _status_payload("⏳ Working on your reel…")) if rich else None
         if mid is None:
             await bot.send_message(chat_id, f"⏳ Processing {url[:80]}…")
 
         async def progress(stage: str) -> None:
             if mid and stage == "acquired":
-                await _edit_rich(chat_id, mid, "<b>✍️ Got it — writing your note…</b>")
+                await _edit_rich(chat_id, mid, _status_payload("✍️ Got it — writing your note…"))
 
-        html_msg, rich_md = await run_pipeline(url, force=force, on_progress=progress)
+        html_msg, rich_md, rich_blocks = await run_pipeline(url, force=force, on_progress=progress)
 
         # Replace the placeholder in place (no orphaned "Working…" message).
-        if mid and await _edit_rich(chat_id, mid, rich_md or html_msg):
+        # Native blocks first, then rich HTML, then a plain fresh send.
+        if mid and await _edit_rich(chat_id, mid, rich_blocks or rich_md or html_msg):
             return
-        await deliver(bot, chat_id, html_msg, rich_md)  # fresh-send fallback
+        await deliver(bot, chat_id, html_msg, rich_md, rich_blocks)  # fresh-send fallback
     except Exception as e:  # noqa: BLE001
         # Anything unhandled must still close the loop — otherwise the user is
         # left watching "⏳ Working…" forever with no idea the reel died.
@@ -887,7 +1025,7 @@ async def _resume_pending(app) -> None:
 def main() -> None:
     load_env()
     if len(sys.argv) >= 3 and sys.argv[1] == "--test":
-        html_msg, rich_md = asyncio.run(run_pipeline(sys.argv[2], force=True))
+        html_msg, rich_md, rich_blocks = asyncio.run(run_pipeline(sys.argv[2], force=True))
         print("=== RICH HTML ===\n" + (rich_md or "(none)") + "\n\n=== PLAIN FALLBACK ===\n" + html_msg)
         return
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
