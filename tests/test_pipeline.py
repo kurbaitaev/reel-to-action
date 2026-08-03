@@ -174,6 +174,36 @@ def test_carousel_downloads_every_slide_with_unique_names():
     assert not [p for p in acquire.TMP.glob("C1*")], "media not cleaned up"
 
 
+def test_tweet_urls_normalize_and_are_detected():
+    for u in ["https://twitter.com/NASA/status/123",
+              "https://x.com/NASA/status/123?s=20&t=abc",
+              "https://x.com/NASA/status/123"]:
+        assert acquire.is_twitter(u)
+        assert acquire.normalize_url(u) == "https://x.com/NASA/status/123"
+    assert not acquire.is_twitter("https://x.com/NASA")  # profile, not a post
+
+
+def test_text_only_tweet_still_produces_a_note():
+    """yt-dlp refuses tweets without video ("No video could be found"), which
+    lost the note entirely. The Apify path must handle text and photo tweets."""
+    import os
+    os.environ["APIFY_TOKEN"] = "test-token"
+    acquire._apify_run = lambda actor, payload, token, timeout=300: [{
+        "fullText": "a tweet with no video at all",
+        "author": {"userName": "someone", "name": "Some One"},
+        "lang": "en",
+        "extendedEntities": {"media": [
+            {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/x.jpg"}]},
+    }]
+    acquire._download = lambda src, dest, timeout=60: pathlib.Path(dest).write_bytes(b"jpg")
+    m = acquire.acquire("https://x.com/someone/status/999")
+    assert m["platform"] == "twitter"
+    assert m["kind"] == "image" and len(m["images"]) == 1
+    assert m["author"] == "someone"
+    assert "no video" in m["caption"]
+    acquire.cleanup(m)
+
+
 # --- openai backend ------------------------------------------------------
 
 def test_openai_schema_obeys_strict_mode():

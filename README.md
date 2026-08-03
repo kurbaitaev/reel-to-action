@@ -140,7 +140,7 @@ The bot's own logs are gitignored, and `.env` is never committed. Telegram reque
 ## Limitations
 
 - **macOS only.** The service layer is launchd; the rest is portable but untested elsewhere.
-- **Instagram-focused.** Other links (YouTube, TikTok, articles) go through yt-dlp and mostly work, but the note templates are tuned for reels.
+- **Instagram and X are first-class.** Instagram uses Apify (spoken transcript) with yt-dlp as fallback; X/Twitter uses Apify's tweet scraper, which handles text, photo and video posts — yt-dlp only understands tweets containing video. YouTube and TikTok go through yt-dlp and mostly work. **Plain articles and newsletters don't yet** — anything with no video fails, since nothing fetches the page text.
 - **Acquisition breaks periodically.** Instagram changes things; yt-dlp catches up within days. Keep it updated.
 - **Single user.** One person, one machine, a JSON-file ledger. Sharing it with friends means one install each.
 - Verified links are checked by an LLM with web search. ✅ means it found a canonical page — not a human guarantee.

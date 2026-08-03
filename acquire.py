@@ -40,7 +40,8 @@ _IG_RE = re.compile(
 # Share links carry per-recipient tracking params that would make the same post
 # a different ledger key every time it's shared.
 _TRACKING = re.compile(r"^(igsh|igshid|xmt|slof|utm_[a-z]+|si|feature|fbclid|gclid)$", re.I)
-_STRIP_QUERY_HOSTS = ("threads.com", "threads.net", "tiktok.com", "instagram.com")
+_STRIP_QUERY_HOSTS = ("threads.com", "threads.net", "tiktok.com", "instagram.com",
+                      "x.com", "twitter.com")
 
 
 def normalize_url(url: str) -> str:
@@ -55,6 +56,9 @@ def normalize_url(url: str) -> str:
     if m:
         kind = "reel" if m.group(1) == "reels" else m.group(1)  # /reels/ == /reel/
         return f"https://www.instagram.com/{kind}/{m.group(2)}/"
+    t = _TWEET_RE.search(url)
+    if t:  # twitter.com and x.com are the same post
+        return f"https://x.com/{t.group(1)}/status/{t.group(2)}"
     try:
         parts = urllib.parse.urlsplit(url)
         if parts.scheme in ("http", "https") and any(
@@ -76,9 +80,19 @@ def _shortcode(url: str) -> str:
     return m.group(2) if m else re.sub(r"\W+", "", (url or "x"))[-16:] or "reel"
 
 
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
+
+
 def _download(src: str, dest: str, timeout: int = 60) -> None:
-    """urlretrieve has no timeout — a half-open CDN socket would hang forever."""
-    with urllib.request.urlopen(src, timeout=timeout) as r, open(dest, "wb") as f:
+    """urlretrieve has no timeout — a half-open CDN socket would hang forever.
+
+    The User-Agent is required: X's media CDN (pbs/video.twimg.com) answers
+    urllib's default agent with 403, which silently cost us every tweet image
+    and video.
+    """
+    req = urllib.request.Request(src, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f)
 
 
@@ -176,6 +190,87 @@ def is_instagram(url: str) -> bool:
     return "instagram.com" in url
 
 
+_TWEET_RE = re.compile(r"(?:twitter|x)\.com/([A-Za-z0-9_]+)/status/(\d+)")
+
+
+def is_twitter(url: str) -> bool:
+    return bool(_TWEET_RE.search(url or ""))
+
+
+def _acquire_apify_twitter(url: str, token: str) -> dict:
+    """X/Twitter via apidojo~tweet-scraper.
+
+    Preferred over yt-dlp for X because yt-dlp only understands video: a
+    text-only tweet returns "No video could be found" and the note is lost.
+    This actor returns the full text, author and media for every tweet type —
+    text, photo and video — in one call.
+    """
+    actor = os.environ.get("APIFY_TWEET_ACTOR", "apidojo~tweet-scraper").strip()
+    items = _apify_run(actor, {"startUrls": [url], "maxItems": 1}, token)
+    if not items:
+        raise AcquireError("Apify returned nothing for this tweet (deleted, private, or protected?)")
+    it = items[0]
+    author_obj = it.get("author") or {}
+    caption = (it.get("fullText") or it.get("text") or "").strip()
+    short = _shortcode(url)
+
+    images, video_path, frames = [], None, []
+    media = (it.get("extendedEntities") or {}).get("media") or []
+    videos = [m for m in media if m.get("type") in ("video", "animated_gif")]
+    photos = [m for m in media if m.get("type") == "photo"]
+
+    if videos:
+        variants = [v for v in (videos[0].get("video_info") or {}).get("variants", [])
+                    if v.get("content_type") == "video/mp4" and v.get("url")]
+        variants.sort(key=lambda v: v.get("bitrate") or 0, reverse=True)
+        if variants:
+            video_path = str(TMP / f"{short}.mp4")
+            try:
+                _download(variants[0]["url"], video_path, timeout=120)
+            except Exception as e:  # noqa: BLE001
+                log.warning("tweet video download failed (%s)", e)
+                video_path = None
+        n = int(os.environ.get("VIDEO_FRAMES", "6"))
+        frames = video_frames(video_path, short, n)
+        if video_path:
+            # No speech-to-text for X, so the file itself is of no further use
+            # once frames are extracted.
+            pathlib.Path(video_path).unlink(missing_ok=True)
+            video_path = None
+    else:
+        for i, m in enumerate(photos[:12]):
+            src = m.get("media_url_https") or m.get("media_url")
+            if not src:
+                continue
+            p = str(TMP / f"{short}-slide{i}.jpg")
+            try:
+                _download(src, p)
+                images.append(p)
+            except Exception as e:  # noqa: BLE001
+                log.warning("tweet image %d download failed (%s)", i, e)
+
+    if not (caption or images or frames):
+        raise AcquireError("Tweet had no text or media we could read")
+
+    kind = "video" if frames else ("carousel" if len(images) > 1 else
+                                   ("image" if images else "article"))
+    log.info("tweet via %s: %d char(s) text, %d image(s), %d frame(s)",
+             actor, len(caption), len(images), len(frames))
+    return {
+        "source_url": url,
+        "platform": "twitter",
+        "kind": kind,
+        "caption": caption,
+        "author": author_obj.get("userName") or author_obj.get("name"),
+        "title": caption[:80] or short,
+        "transcript": "",  # X has no transcript source; frames carry on-screen text
+        "detected_language": it.get("lang"),
+        "video_path": video_path,
+        "images": images,
+        "frames": frames,
+    }
+
+
 def acquire(url: str) -> dict:
     """Return {source_url, platform, caption, author, title, video_path, raw}.
 
@@ -193,6 +288,14 @@ def acquire(url: str) -> dict:
             return _acquire_apify_instagram(url, token)
         except AcquireError as e:
             log.warning("Apify path failed (%s) — falling back to yt-dlp", e)
+            return _acquire_ytdlp(url)
+    if is_twitter(url) and token:
+        # yt-dlp only handles tweets that contain video; Apify covers text and
+        # photo tweets too. Still fall back, since yt-dlp needs no token.
+        try:
+            return _acquire_apify_twitter(url, token)
+        except AcquireError as e:
+            log.warning("tweet actor failed (%s) — falling back to yt-dlp", e)
             return _acquire_ytdlp(url)
     if is_instagram(url) and not token:
         log.info("No APIFY_TOKEN — using yt-dlp (no spoken transcript; "
