@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -61,10 +62,15 @@ def alert(token: str, chat: str, text: str) -> None:
         pass
 
 
+IS_MAC = sys.platform == "darwin"
+
+
 def restart() -> None:
-    uid = os.getuid()
-    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{LABEL}"],
-                   capture_output=True, text=True)
+    if IS_MAC:
+        cmd = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"]
+    else:  # systemd handles restarts itself, but kick it if we're called anyway
+        cmd = ["systemctl", "--user", "restart", "reel-to-action.service"]
+    subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
 def wlog(msg: str) -> None:
@@ -98,6 +104,10 @@ def claude_token_expired() -> bool:
     """
     if _AUTH_FAILED.exists():
         return True
+    if not IS_MAC:
+        # No login keychain off macOS, and a server runs on an API key anyway —
+        # the .auth_failed flag above is the signal that matters there.
+        return False
     try:
         r = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
                            capture_output=True, text=True, timeout=10)

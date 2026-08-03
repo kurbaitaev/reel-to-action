@@ -1,0 +1,23 @@
+[Unit]
+Description=reel-to-action Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+ExecStart=__PYTHON__ __DIR__/bot.py
+# systemd is the watchdog on Linux — it restarts the bot on any exit.
+Restart=always
+RestartSec=10
+StandardOutput=append:__DIR__/logs/bot.out.log
+StandardError=append:__DIR__/logs/bot.err.log
+# Small hardening: the bot only needs its own directory and /tmp.
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__DIR__ /tmp/reel-to-action
+
+[Install]
+WantedBy=default.target

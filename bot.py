@@ -31,6 +31,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import acquire
+import agent_openai
 import ledger
 import notion
 
@@ -73,6 +74,34 @@ def load_env() -> None:
 
 
 JSON_RE = re.compile(r"@@JSON@@\s*(.*?)\s*@@END@@", re.DOTALL)
+
+def _media_context(url: str, media: dict) -> str:
+    """The per-reel facts, without any local file paths.
+
+    Used by the OpenAI backend, which receives the images attached to the
+    request rather than as paths on disk.
+    """
+    ctx = [f"URL: {url}", f"Platform: {media.get('platform')}", f"Kind: {media.get('kind')}",
+           f"Today's date: {datetime.date.today().isoformat()}"]
+    if media.get("author"):
+        ctx.append(f"Author: {media['author']}")
+    if media.get("caption"):
+        ctx.append(f"Caption:\n{media['caption'][:2000]}")
+    if media.get("transcript"):
+        ctx.append("TRANSCRIPT (verbatim spoken audio — do NOT paste it back; use it to "
+                   f"write description/summary/items):\n{media['transcript'][:12000]}")
+    elif media.get("images"):
+        ctx.append("No audio — the attached images ARE the content. Fill `slides`, one entry "
+                   "per image, in order.")
+    else:
+        ctx.append("No spoken transcript was available. Work from the caption and the attached "
+                   "frames, and say so plainly in `description`.")
+    if media.get("frames"):
+        ctx.append(f"{len(media['frames'])} frame(s) sampled from the video are attached — read "
+                   "the on-screen text; reels often show book titles, names and lists that are "
+                   "never said out loud.")
+    return "\n".join(ctx)
+
 
 def build_prompt(url: str, media: dict) -> str:
     """Compose the agent prompt with pre-acquired media context."""
@@ -195,15 +224,28 @@ async def run_pipeline(url: str, force: bool = False, on_progress=None,
 
     if on_progress:
         await on_progress("acquired")
-    raw = await run_agent(build_prompt(url, media))
-    if raw.startswith(("❌", "⏰")):
-        return html.escape(raw), None, None
 
-    obj = _parse_output(raw)
-    if obj is None:
-        # Couldn't parse structured output — send the cleaned text as-is.
-        log.warning("no @@JSON@@ block in agent output for %s", url)
-        return html.escape(JSON_RE.sub("", raw).strip()), None, None
+    if agent_openai.enabled():
+        # API-key backend: works headless, so this is what runs on a server.
+        try:
+            obj = await asyncio.to_thread(
+                agent_openai.analyze,
+                PROMPT_FILE.read_text(),
+                _media_context(url, media),
+                (media.get("images") or []) + (media.get("frames") or []),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error("openai backend failed for %s: %s", url, e)
+            return html.escape(f"❌ {e}"), None, None
+    else:
+        raw = await run_agent(build_prompt(url, media))
+        if raw.startswith(("❌", "⏰", "🔑")):
+            return html.escape(raw), None, None
+        obj = _parse_output(raw)
+        if obj is None:
+            # Couldn't parse structured output — send the cleaned text as-is.
+            log.warning("no @@JSON@@ block in agent output for %s", url)
+            return html.escape(JSON_RE.sub("", raw).strip()), None, None
 
     obj = _sanitize(obj)
     n_bad = _validate_links(obj)

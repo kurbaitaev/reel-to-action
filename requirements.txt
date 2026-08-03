@@ -1,7 +1,11 @@
 # Python deps (pip install -r requirements.txt) — needs Python 3.10+
 python-telegram-bot>=22.8
 
+# Only needed for the OpenAI backend (OPENAI_API_KEY). The Claude Code CLI
+# backend doesn't use it.
+openai>=2.52.0
+
 # Not installable via pip — see README, and run `python3 doctor.py` to check:
-#   claude    Claude Code CLI   https://claude.com/product/claude-code
-#   yt-dlp    brew install yt-dlp    (Instagram needs >= 2026.07.04)
-#   ffmpeg    brew install ffmpeg    (frame sampling, includes ffprobe)
+#   claude    Claude Code CLI   https://claude.com/product/claude-code  (only for the CLI backend)
+#   yt-dlp    Instagram without Apify (needs >= 2026.07.04)
+#   ffmpeg    frame sampling + image downscaling (includes ffprobe)

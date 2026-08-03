@@ -7,6 +7,7 @@ Every line is either OK, MISSING (must fix), or OPTIONAL (works without it,
 but you lose something specific).
 """
 
+import json
 import os
 import pathlib
 import shutil
@@ -69,28 +70,46 @@ def main() -> int:
         need(True, "python-telegram-bot", "", "installed")
     except ImportError:
         need(False, "python-telegram-bot", "pip install -r requirements.txt")
-    need(bool(shutil.which("claude")), "claude CLI",
-         "install Claude Code: https://claude.com/product/claude-code")
     need(bool(env("TELEGRAM_BOT_TOKEN")), "TELEGRAM_BOT_TOKEN",
          "get one from @BotFather on Telegram, put it in .env")
     need(bool(env("ALLOWED_USER_IDS")), "ALLOWED_USER_IDS",
          "send /start to your bot to learn your id, then put it in .env "
          "(without it the bot refuses everyone)")
 
-    # Either an API key or a logged-in CLI is needed for the agent to run.
-    has_key = bool(env("ANTHROPIC_API_KEY"))
+    # Reasoning backend: an API key works anywhere; the CLI login is Mac-only
+    # and expires. Exactly one of these must be usable.
+    openai_key = bool(env("OPENAI_API_KEY"))
+    anthropic_key = bool(env("ANTHROPIC_API_KEY"))
+    cli = bool(shutil.which("claude"))
     logged_in = False
-    if not has_key:
+    if cli and not (openai_key or anthropic_key):
         try:
             r = subprocess.run(["security", "find-generic-password", "-s",
                                 "Claude Code-credentials", "-w"],
                                capture_output=True, text=True, timeout=10)
-            logged_in = bool(r.stdout.strip())
+            blob = json.loads(r.stdout.strip()).get("claudeAiOauth", {})
+            exp = blob.get("expiresAt") or 0
+            logged_in = bool(exp) and exp / 1000 >= __import__("time").time()
         except Exception:  # noqa: BLE001
             logged_in = False
-    need(has_key or logged_in, "Claude auth",
-         "either run `claude` then /login, or set ANTHROPIC_API_KEY in .env",
-         "ANTHROPIC_API_KEY" if has_key else "Claude Code login")
+    if openai_key:
+        backend = f"OpenAI ({env('OPENAI_MODEL') or 'gpt-5.6-terra'})"
+    elif anthropic_key:
+        backend = "Anthropic API key"
+    elif logged_in:
+        backend = "Claude CLI login (expires; not usable on a server)"
+    else:
+        backend = ""
+    need(bool(backend), "reasoning backend",
+         "set OPENAI_API_KEY (or ANTHROPIC_API_KEY) in .env, or run `claude` then /login",
+         backend)
+    if openai_key:
+        try:
+            import openai  # noqa: F401
+            say(OK, "openai package", "installed")
+        except ImportError:
+            say(BAD, "openai package", "pip install -r requirements.txt")
+            problems += 1
 
     print("\nInstagram\n")
     ver = ytdlp_version()

@@ -14,6 +14,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import acquire  # noqa: E402
+import agent_openai  # noqa: E402
 import bot  # noqa: E402
 import ledger  # noqa: E402
 import notion  # noqa: E402
@@ -171,6 +172,38 @@ def test_carousel_downloads_every_slide_with_unique_names():
     assert len(set(m["images"])) == 5, "slide filenames collided"
     acquire.cleanup(m)
     assert not [p for p in acquire.TMP.glob("C1*")], "media not cleaned up"
+
+
+# --- openai backend ------------------------------------------------------
+
+def test_openai_schema_obeys_strict_mode():
+    """OpenAI strict mode rejects the whole request unless every object lists
+    all its properties in `required` and sets additionalProperties: false."""
+    def check(node, path="root"):
+        if node.get("type") == "object":
+            assert node.get("additionalProperties") is False, f"{path}: additionalProperties"
+            props, req = set(node.get("properties", {})), set(node.get("required", []))
+            assert props == req, f"{path}: required != properties ({props ^ req})"
+            for k, v in node["properties"].items():
+                check(v, f"{path}.{k}")
+        elif node.get("type") == "array":
+            check(node["items"], path + "[]")
+
+    check(agent_openai.SCHEMA)
+    # The renderers, Notion sink and vault writer all read these.
+    for field in ("title", "content_type", "items", "points", "steps", "slides",
+                  "tags", "categories", "description", "summary", "why_save", "quote"):
+        assert field in agent_openai.SCHEMA["properties"], f"schema is missing {field}"
+
+
+def test_openai_backend_is_off_without_a_key():
+    import os
+    saved = os.environ.pop("OPENAI_API_KEY", None)
+    try:
+        assert agent_openai.enabled() is False
+    finally:
+        if saved:
+            os.environ["OPENAI_API_KEY"] = saved
 
 
 # --- notion --------------------------------------------------------------
