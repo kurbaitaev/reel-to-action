@@ -21,6 +21,7 @@ import re
 import shutil
 import signal
 import sys
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -51,6 +52,13 @@ HEARTBEAT = PROJECT_DIR / "logs" / "heartbeat"
 # Normalized urls currently being processed, so the same reel can't be handled
 # twice concurrently (the startup resume task runs outside Telegram's lock).
 _in_flight: set[str] = set()
+
+# Ground truth for "the login is dead": the agent actually said so. The keychain
+# is only a guess, and guessing wrong once cost three reels with no alert.
+AUTH_FAILED_FLAG = PROJECT_DIR / "logs" / ".auth_failed"
+_AUTH_FAIL_RE = re.compile(
+    r"OAuth (?:session|token) expired|Failed to authenticate|not authenticated|"
+    r"Invalid API key|authentication_error|\b401\b", re.I)
 
 
 def load_env() -> None:
@@ -143,8 +151,20 @@ async def run_agent(prompt: str) -> str:
         mins = AGENT_TIMEOUT_S // 60
         return f"⏰ Timed out after {mins} minutes. Try again or check the link."
     if proc.returncode != 0:
-        log.error("agent failed (%s): %s", proc.returncode, stderr.decode()[-2000:])
-        return f"❌ Agent failed:\n{stderr.decode()[-1500:] or stdout.decode()[-1500:]}"
+        err = stderr.decode(errors="replace").strip()
+        out = stdout.decode(errors="replace").strip()
+        # The CLI reports auth failures on stdout, so logging stderr alone left
+        # "agent failed (1):" with no cause at all.
+        detail = err or out or "(no output from the agent)"
+        log.error("agent failed (%s): %s", proc.returncode, detail[-2000:])
+        if _AUTH_FAIL_RE.search(detail):
+            AUTH_FAILED_FLAG.parent.mkdir(exist_ok=True)
+            AUTH_FAILED_FLAG.write_text(str(int(time.time())))
+            log.error("agent auth failure — flagged for the watchdog")
+            return ("🔑 Claude login expired — the bot can't analyze reels until you run "
+                    "`claude` then `/login` in a terminal. Send the link again afterwards.")
+        return f"❌ Agent failed:\n{detail[-1500:]}"
+    AUTH_FAILED_FLAG.unlink(missing_ok=True)  # a successful run proves auth works
     return stdout.decode().strip() or "❌ Agent returned no output."
 
 
@@ -992,9 +1012,21 @@ async def _resume_pending(app) -> None:
     pend = ledger.pending_all()
     if not pend:
         return
+    if AUTH_FAILED_FLAG.exists():
+        # Retrying now would spend the 3 recovery attempts on certain failures
+        # and drop the reels for good. They stay pending until the login works.
+        log.warning("%d reel(s) pending but the Claude login is dead — "
+                    "holding them until you log in", len(pend))
+        return
 
     async def _go() -> None:
         for url, rec in list(pend.items()):
+            if AUTH_FAILED_FLAG.exists():
+                # Checked every iteration, not just up front: the first reel is
+                # often what reveals the login is dead, and without this the rest
+                # of the queue is spent on guaranteed failures.
+                log.warning("login died mid-recovery — leaving the rest pending")
+                return
             chat_id = rec.get("chat_id")
             if not chat_id:
                 ledger.pending_remove(url)

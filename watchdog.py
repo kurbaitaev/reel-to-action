@@ -81,21 +81,39 @@ AUTH_GRACE_S = 6 * 3600
 _AUTH_SEEN = PROJ / "logs" / ".auth_expired_since"
 
 
+_AUTH_FAILED = PROJ / "logs" / ".auth_failed"  # written by bot.py on a real 401
+
+
 def claude_token_expired() -> bool:
-    """True only if the login has been expired for longer than the grace period
-    AND has no refresh token (i.e. it genuinely needs an interactive /login)."""
+    """True when the login genuinely needs an interactive `claude` → /login.
+
+    Two signals, because neither alone is reliable:
+      1. bot.py saw an actual authentication failure from the agent. This is
+         ground truth and beats any guess from the keychain.
+      2. The keychain has no usable session: expired (or expiresAt 0/absent,
+         which is what a logged-out state looks like) AND no refresh token.
+         An earlier version treated a falsy expiresAt as "no expiry set, so
+         fine" — so a fully logged-out account read as healthy and three
+         reels failed with no alert.
+    """
+    if _AUTH_FAILED.exists():
+        return True
     try:
         r = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
                            capture_output=True, text=True, timeout=10)
         blob = json.loads(r.stdout.strip()).get("claudeAiOauth", {})
-        exp = blob.get("expiresAt")
-        fresh = not exp or (exp / 1000) >= time.time()
-        if fresh or blob.get("refreshToken"):
-            _AUTH_SEEN.unlink(missing_ok=True)  # refreshable → not a real outage
+        exp = blob.get("expiresAt") or 0
+        has_session = bool(exp) and (exp / 1000) >= time.time()
+        if has_session:
+            _AUTH_SEEN.unlink(missing_ok=True)
             return False
-        first = float(_AUTH_SEEN.read_text()) if _AUTH_SEEN.exists() else time.time()
-        _AUTH_SEEN.write_text(str(first))
-        return (time.time() - first) > AUTH_GRACE_S
+        if blob.get("refreshToken"):
+            # Access tokens expire hourly and refresh silently; only alert if
+            # that never happens over several checks.
+            first = float(_AUTH_SEEN.read_text()) if _AUTH_SEEN.exists() else time.time()
+            _AUTH_SEEN.write_text(str(first))
+            return (time.time() - first) > AUTH_GRACE_S
+        return True  # no valid session and nothing to refresh with
     except Exception:  # noqa: BLE001
         return False  # can't read → don't false-alarm
 
@@ -112,6 +130,7 @@ def check_claude_auth(token: str, chat: str) -> None:
             wlog("claude OAuth EXPIRED -> alerted user")
     elif _AUTH_FLAG.exists():
         _AUTH_FLAG.unlink(missing_ok=True)
+        _AUTH_FAILED.unlink(missing_ok=True)
         alert(token, chat, "✅ Claude login restored — the bot is analyzing reels again.")
         wlog("claude OAuth restored")
 
