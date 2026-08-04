@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -1010,6 +1011,23 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 MAX_RESUME_ATTEMPTS = 3
 
 
+def _auth_looks_ok() -> bool:
+    """Cheap check that the reasoning backend can authenticate, without burning
+    an agent run. Used to lift the auth-failure hold once you've logged back in."""
+    if agent_openai.enabled() or os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return True
+    if sys.platform != "darwin":
+        return False  # no keychain to consult; wait for a successful run
+    try:
+        r = subprocess.run(["security", "find-generic-password", "-s",
+                            "Claude Code-credentials", "-w"],
+                           capture_output=True, text=True, timeout=10)
+        exp = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("expiresAt") or 0
+        return bool(exp) and exp / 1000 >= time.time()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 LOG_MAX_BYTES = 20 * 1024 * 1024
 LOG_KEEP_BYTES = 2 * 1024 * 1024
 
@@ -1055,11 +1073,17 @@ async def _resume_pending(app) -> None:
     if not pend:
         return
     if AUTH_FAILED_FLAG.exists():
-        # Retrying now would spend the 3 recovery attempts on certain failures
-        # and drop the reels for good. They stay pending until the login works.
-        log.warning("%d reel(s) pending but the Claude login is dead — "
-                    "holding them until you log in", len(pend))
-        return
+        if _auth_looks_ok():
+            # Otherwise this deadlocks: the flag blocks recovery, but only a
+            # successful run clears the flag, and recovery is what would run.
+            AUTH_FAILED_FLAG.unlink(missing_ok=True)
+            log.info("auth looks restored — recovering %d held reel(s)", len(pend))
+        else:
+            # Retrying now would spend the 3 recovery attempts on certain
+            # failures and drop the reels for good.
+            log.warning("%d reel(s) pending but the login is still dead — "
+                        "holding them", len(pend))
+            return
 
     async def _go() -> None:
         for url, rec in list(pend.items()):
