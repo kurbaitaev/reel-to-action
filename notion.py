@@ -15,6 +15,8 @@ import logging
 import os
 import urllib.request
 
+import folders
+
 log = logging.getLogger("reel-to-action.notion")
 
 API = "https://api.notion.com/v1/pages"
@@ -270,6 +272,7 @@ def push_reel(obj: dict, source_url: str, date_iso: str,
             props[name] = payload
 
     setp("Source", source_url)
+    setp("Folder", folders.normalize(obj.get("folder")))
     setp("Date", date_iso)
     setp("Items", len(items))
     if cats:

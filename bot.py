@@ -33,6 +33,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 import acquire
 import agent_openai
+import folders
 import ledger
 import notion
 
@@ -359,6 +360,8 @@ def _sanitize(obj: dict) -> dict:
     for key in ("items", "slides"):
         val = obj.get(key)
         obj[key] = [v for v in val if isinstance(v, dict)] if isinstance(val, list) else []
+    # Exactly one valid folder, always — it decides where the note is filed.
+    obj["folder"] = folders.normalize(obj.get("folder"))
     return obj
 
 
@@ -829,7 +832,9 @@ async def process(bot, chat_id: int, url: str, force: bool) -> None:
 
 def _write_vault_note(obj: dict, url: str, transcript: str, date_iso: str) -> str:
     """Bot writes the durable vault note (markdown mirror of the saved note)."""
-    d = PROJECT_DIR / "vault" / "Action Inbox"
+    # Filed into its folder, so the vault browses like folders instead of one
+    # 160-file inbox.
+    d = PROJECT_DIR / "vault" / folders.safe_dirname(obj.get("folder"))
     d.mkdir(parents=True, exist_ok=True)
     title = (obj.get("title") or "reel").strip()
     safe = re.sub(r"[^\w\- ]", "", title)[:60].strip() or "reel"

@@ -23,6 +23,8 @@ import os
 import pathlib
 import subprocess
 
+import folders
+
 log = logging.getLogger("reel-to-action.openai")
 
 DEFAULT_MODEL = "gpt-5.6-terra"  # vision + web search at 1/2.5 the price of -sol
@@ -72,6 +74,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string"},
+        "folder": {"type": "string", "enum": folders.FOLDERS},
         "content_type": {
             "type": "string",
             "enum": ["quote", "motivational_quote", "thought", "tip", "educational",
@@ -96,7 +99,7 @@ SCHEMA = {
         "description": {"type": "string"},
         "summary": {"type": "string"},
     },
-    "required": ["title", "content_type", "kind", "categories", "author", "quote",
+    "required": ["title", "folder", "content_type", "kind", "categories", "author", "quote",
                  "context", "main_idea", "main_thought", "takeaway", "useful_for",
                  "points", "steps", "items", "slides", "why_save", "tags",
                  "description", "summary"],

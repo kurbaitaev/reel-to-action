@@ -16,6 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import acquire  # noqa: E402
 import agent_openai  # noqa: E402
 import bot  # noqa: E402
+import folders  # noqa: E402
 import ledger  # noqa: E402
 import notion  # noqa: E402
 
@@ -202,6 +203,35 @@ def test_text_only_tweet_still_produces_a_note():
     assert m["author"] == "someone"
     assert "no video" in m["caption"]
     acquire.cleanup(m)
+
+
+# --- folders -------------------------------------------------------------
+
+def test_every_note_gets_exactly_one_valid_folder():
+    # The folder decides where the note is filed, so it can never be blank or
+    # something the model invented.
+    for bad in [{}, {"folder": ""}, {"folder": None}, {"folder": "Nonsense"},
+                {"folder": 42}, {"folder": ["Startup"]}]:
+        obj = bot._sanitize(dict(bad))
+        assert obj["folder"] in folders.FOLDERS, f"{bad} -> {obj['folder']}"
+
+
+def test_folder_normalizer_tolerates_near_misses():
+    cases = {
+        "Startup": "Startup", "startup tips": "Startup", "Fundraising": "Startup",
+        "AI Tools": "Tools & AI", "tooling": "Tools & AI",
+        "content": "Content Ideas", "Content Ideas": "Content Ideas",
+        "motivation": "Motivation", "quotes": "Motivation",
+        "Learning & Self": "Learning & Self",
+    }
+    for given, want in cases.items():
+        assert folders.normalize(given) == want, f"{given} -> {folders.normalize(given)}"
+
+
+def test_folder_directory_names_are_filesystem_safe():
+    for f in folders.FOLDERS:
+        d = folders.safe_dirname(f)
+        assert "&" not in d and "/" not in d, f"{f} -> {d}"
 
 
 # --- openai backend ------------------------------------------------------
