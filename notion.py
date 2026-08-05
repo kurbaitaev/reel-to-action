@@ -256,7 +256,6 @@ def push_reel(obj: dict, source_url: str, date_iso: str,
     summary = (obj.get("summary") or "").strip()
     quote = (obj.get("quote") or "").strip()
     author = (author or obj.get("author") or "").strip()
-    cats =[c.strip() for c in (obj.get("categories") or []) if c and c.strip()]
     schema = _db_props(token, db_id)
 
     title_prop = next((n for n, t in schema.items() if t == "title"), "Name")
@@ -275,8 +274,10 @@ def push_reel(obj: dict, source_url: str, date_iso: str,
     setp("Folder", folders.normalize(obj.get("folder")))
     setp("Date", date_iso)
     setp("Items", len(items))
-    if cats:
-        setp("Category", cats)
+    # No "Category" any more. It overlapped Folder and Content type, and having
+    # two taxonomies side by side is what made the database unreadable — an
+    # investor list showed as "Business idea" while its Folder said Startup.
+    # Cross-cutting labels live in `tags` inside the page.
     if _ok(author):
         setp("Author", author[:200])
     if platform:
