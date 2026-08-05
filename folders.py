@@ -98,5 +98,11 @@ def normalize(value) -> str:
 
 
 def safe_dirname(folder: str) -> str:
-    """Folder name as a filesystem directory (kept readable, no surprises)."""
-    return normalize(folder).replace(" & ", " and ")
+    """Folder name as a filesystem directory.
+
+    Deliberately identical to the Notion value — an earlier version rewrote
+    "&" to "and", so the same folder was called "Tools and AI" on disk and
+    "Tools & AI" in Notion, which just looks like two different folders.
+    Only path separators are unsafe in a directory name.
+    """
+    return normalize(folder).replace("/", "-")

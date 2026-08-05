@@ -228,10 +228,13 @@ def test_folder_normalizer_tolerates_near_misses():
         assert folders.normalize(given) == want, f"{given} -> {folders.normalize(given)}"
 
 
-def test_folder_directory_names_are_filesystem_safe():
+def test_folder_directory_name_matches_the_notion_value():
+    """They must be the same string. When the disk said "Tools and AI" and
+    Notion said "Tools & AI", it read as two different folders."""
     for f in folders.FOLDERS:
         d = folders.safe_dirname(f)
-        assert "&" not in d and "/" not in d, f"{f} -> {d}"
+        assert d == f, f"disk name {d!r} differs from Notion value {f!r}"
+        assert "/" not in d, f"{d!r} would nest directories"
 
 
 # --- openai backend ------------------------------------------------------
